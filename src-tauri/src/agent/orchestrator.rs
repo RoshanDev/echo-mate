@@ -31,7 +31,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             hotkey: "CmdOrCtrl+Shift+Space".into(),
-            primary_provider: "codex".into(),
+            primary_provider: "claude".into(),
             fallback_provider: "claude".into(),
             candidate_count: 5,
             timeout_seconds: 45,

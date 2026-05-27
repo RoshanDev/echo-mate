@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.echomate.app",
   "build": {
-    "frontendDist": "../frontend",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../frontend"
   },
   "app": {
     "windows": [
@@ -18,7 +17,7 @@
         "fullscreen": false,
         "decorations": true,
         "alwaysOnTop": true,
-        "visible": false,
+        "visible": true,
         "center": true
       }
     ],

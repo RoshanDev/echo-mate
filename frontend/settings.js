@@ -1,6 +1,14 @@
 // EchoMate Settings Page Logic
+import { invoke } from './lib/@tauri-apps/api/core.js';
 
-const invoke = window.__TAURI__?.core?.invoke;
+async function safeInvoke(cmd, args) {
+  try {
+    return args !== undefined ? await invoke(cmd, args) : await invoke(cmd);
+  } catch (err) {
+    console.error('Invoke failed:', cmd, err);
+    throw err;
+  }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
@@ -9,7 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function loadSettings() {
   try {
-    const settings = await invoke('get_settings');
+    const settings = await safeInvoke('get_settings');
     if (!settings) return;
     document.getElementById('setting-hotkey').value = settings.hotkey || 'CmdOrCtrl+Shift+Space';
     document.getElementById('setting-primary-provider').value = settings.primary_provider || 'codex';
@@ -20,8 +28,8 @@ async function loadSettings() {
     document.getElementById('setting-sqlcipher').checked = settings.sqlcipher === true;
     document.getElementById('setting-tone').value = settings.tone || 'warm_calm';
     document.getElementById('setting-length').value = settings.length || 'short_to_medium';
-    document.getElementById('setting-emoji').value = settings.emoji_level ?? 0.2;
-    document.getElementById('setting-humor').value = settings.humor_level ?? 0.3;
+    document.getElementById('setting-emoji').value = settings.emoji_level !== undefined ? settings.emoji_level : 0.2;
+    document.getElementById('setting-humor').value = settings.humor_level !== undefined ? settings.humor_level : 0.3;
   } catch (err) {
     console.error('Failed to load settings:', err);
   }
@@ -29,7 +37,7 @@ async function loadSettings() {
 
 function setupSettingsButtons() {
   document.getElementById('btn-back').addEventListener('click', () => {
-    invoke('show_popup');
+    safeInvoke('show_popup').catch(() => {});
   });
 
   document.getElementById('btn-save-settings').addEventListener('click', async () => {
@@ -47,8 +55,8 @@ function setupSettingsButtons() {
       humor_level: parseFloat(document.getElementById('setting-humor').value) || 0.3,
     };
     try {
-      await invoke('save_settings', { settings });
-      invoke('show_popup');
+      await safeInvoke('save_settings', { settings });
+      safeInvoke('show_popup').catch(() => {});
     } catch (err) {
       console.error('Failed to save settings:', err);
     }
@@ -56,7 +64,7 @@ function setupSettingsButtons() {
 
   document.getElementById('btn-reset-settings').addEventListener('click', async () => {
     try {
-      await invoke('reset_settings');
+      await safeInvoke('reset_settings');
       await loadSettings();
     } catch (err) {
       console.error('Failed to reset settings:', err);
@@ -67,10 +75,8 @@ function setupSettingsButtons() {
     const btn = document.getElementById('btn-record-hotkey');
     btn.textContent = '按下热键...';
     btn.style.background = 'var(--warning)';
-    invoke('record_hotkey').then(hotkey => {
-      if (hotkey) {
-        document.getElementById('setting-hotkey').value = hotkey;
-      }
+    safeInvoke('record_hotkey').then(hotkey => {
+      if (hotkey) document.getElementById('setting-hotkey').value = hotkey;
       btn.textContent = '录制';
       btn.style.background = '';
     }).catch(() => {

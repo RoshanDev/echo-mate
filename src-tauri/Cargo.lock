@@ -884,6 +884,7 @@ dependencies = [
  "chrono",
  "enigo",
  "keyring",
+ "log",
  "rusqlite",
  "serde",
  "serde_json",

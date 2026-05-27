@@ -14,9 +14,12 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candidate {
     pub text: String,
-    pub tone: String,
-    pub strategy: String,
-    pub risk: String,
+    #[serde(default)]
+    pub style_tags: Vec<String>,
+    #[serde(default)]
+    pub risk_flags: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// Envelope containing 5 candidates from the LLM provider
