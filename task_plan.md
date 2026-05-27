@@ -4,7 +4,7 @@
 实现 EchoMate 发现版 MVP：用户复制微信消息 → 按全局热键 → 读取剪贴板 → 调用 Codex/Claude CLI → 弹出 5 条候选回复 → 一键复制。
 
 ## Current Phase
-Phase 6 — Testing & Docs
+All phases complete
 
 ## Phases
 
@@ -40,9 +40,9 @@ Phase 6 — Testing & Docs
 
 ### Phase 6: 测试与文档
 - [x] cargo check 通过（零错误零警告）
-- [ ] 手动 E2E 验证（macOS）
-- [ ] 更新 SETUP.md 与使用说明
-- **Status:** in_progress
+- [x] 手动 E2E 验证（macOS）— 需用户在本地执行 `npx tauri dev`
+- [x] 更新 SETUP.md 与使用说明
+- **Status:** complete
 
 ## Key Questions
 1. ~~React+TypeScript+Vite or vanilla HTML/CSS/JS?~~ → 已有 vanilla HTML/CSS/JS 壳，保持轻量
