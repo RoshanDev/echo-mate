@@ -7,19 +7,45 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div id="app">
-    <div id="header">EchoMate - AI 回复助手</div>
-    <div id="candidates">
-      <div class="candidate-card" v-for="i in 5" data-index="i-1">
-        <div class="candidate-text">等待生成...</div>
-        <div class="candidate-meta">
-          <span class="tone"></span>
-          <button class="copy-btn">复制</button>
-        </div>
+  <!-- Candidate Popup -->
+  <div id="popup">
+    <div id="header">
+      <div class="header-left">
+        <span class="logo">EchoMate</span>
+      </div>
+      <div class="header-right">
+        <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+        <button id="btn-close" class="icon-btn" title="关闭">✕</button>
       </div>
     </div>
-    <div id="status">按热键开始...</div>
+
+    <div id="status-bar">
+      <span id="status-icon">📋</span>
+      <span id="status-text">就绪，等待热键触发...</span>
+      <span id="provider-badge"></span>
+    </div>
+
+    <div id="mode-indicator" style="display:none">
+      <span id="mode-label"></span>
+      <span id="provider-label"></span>
+    </div>
+
+    <div id="candidates-container">
+      <div id="loading" style="display:none">
+        <div class="spinner"></div>
+        <span>正在生成候选回复...</span>
+      </div>
+      <div id="error-msg" style="display:none"></div>
+      <div id="candidates-list"></div>
+    </div>
+
+    <div id="actions" style="display:none">
+      <button id="btn-conservative" class="action-btn secondary">🛡 再保守一点</button>
+      <button id="btn-fun" class="action-btn secondary">😄 再有趣一点</button>
+      <button id="btn-regenerate" class="action-btn primary">🔄 重新生成</button>
+    </div>
   </div>
+
   <script src="main.js"></script>
 </body>
 </html>

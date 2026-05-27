@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EchoMate Settings</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="settings-page">
+    <div id="header">
+      <div class="header-left">
+        <button id="btn-back" class="icon-btn" title="返回">←</button>
+        <span class="logo">设置</span>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>快捷键</h3>
+      <div class="setting-row">
+        <label>全局热键</label>
+        <input type="text" id="setting-hotkey" value="CmdOrCtrl+Shift+Space" readonly />
+        <button id="btn-record-hotkey" class="small-btn">录制</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Provider</h3>
+      <div class="setting-row">
+        <label>主 Provider</label>
+        <select id="setting-primary-provider">
+          <option value="codex">Codex</option>
+          <option value="claude">Claude</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>备用 Provider</label>
+        <select id="setting-fallback-provider">
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+          <option value="none">无</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>候选数量</label>
+        <input type="number" id="setting-candidate-count" value="5" min="3" max="10" />
+      </div>
+      <div class="setting-row">
+        <label>超时 (秒)</label>
+        <input type="number" id="setting-timeout" value="45" min="15" max="120" />
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>隐私与安全</h3>
+      <div class="setting-row">
+        <label>严格隐私模式</label>
+        <input type="checkbox" id="setting-strict-privacy" checked />
+        <span class="hint">不记录原始消息全文</span>
+      </div>
+      <div class="setting-row">
+        <label>数据库加密</label>
+        <input type="checkbox" id="setting-sqlcipher" />
+        <span class="hint">使用 SQLCipher 加密数据库</span>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>风格画像</h3>
+      <div class="setting-row">
+        <label>语气</label>
+        <select id="setting-tone">
+          <option value="warm_calm">温和冷静</option>
+          <option value="casual">轻松随意</option>
+          <option value="formal">正式礼貌</option>
+          <option value="humorous">幽默风趣</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>回复长度</label>
+        <select id="setting-length">
+          <option value="short">短 (8-20字)</option>
+          <option value="short_to_medium" selected>短到中等 (10-45字)</option>
+          <option value="medium">中等 (20-60字)</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>Emoji 程度</label>
+        <input type="range" id="setting-emoji" value="0.2" min="0" max="1" step="0.1" />
+      </div>
+      <div class="setting-row">
+        <label>幽默程度</label>
+        <input type="range" id="setting-humor" value="0.3" min="0" max="1" step="0.1" />
+      </div>
+    </div>
+
+    <div class="settings-actions">
+      <button id="btn-save-settings" class="action-btn primary">保存设置</button>
+      <button id="btn-reset-settings" class="action-btn secondary">恢复默认</button>
+    </div>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>
