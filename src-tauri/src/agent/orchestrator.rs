@@ -34,7 +34,7 @@ impl Default for AppConfig {
             primary_provider: "claude".into(),
             fallback_provider: "claude".into(),
             candidate_count: 5,
-            timeout_seconds: 45,
+            timeout_seconds: 180,
             strict_privacy: true,
             sqlcipher: false,
             tone: "warm_calm".into(),
