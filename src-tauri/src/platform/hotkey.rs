@@ -17,30 +17,51 @@ impl HotkeyManager {
     where
         F: Fn() + Send + Sync + 'static,
     {
-        let shortcut: Shortcut = hotkey_str.parse().unwrap_or_else(|_| {
-            tracing::warn!("Invalid hotkey '{}', using default", hotkey_str);
+        let shortcut: Shortcut = hotkey_str.parse().unwrap_or_else(|e| {
+            tracing::warn!("Invalid hotkey '{}': {e}, using default", hotkey_str);
             DEFAULT_HOTKEY.parse().unwrap()
         });
 
-        app.global_shortcut().on_shortcut(shortcut.clone(), move |_app, _sc, event| {
+        // Unregister old shortcut FIRST to avoid id conflicts
+        {
+            let mut registered = self.registered.lock().unwrap();
+            if let Some(old) = registered.take() {
+                if let Err(e) = app.global_shortcut().unregister(old) {
+                    tracing::warn!("Failed to unregister old hotkey: {e}");
+                }
+            }
+        }
+
+        // Register the new shortcut
+        let hotkey_for_log = hotkey_str.to_string();
+        match app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
             if event.state == ShortcutState::Pressed {
-                tracing::info!("Hotkey triggered: {:?}", _sc);
+                tracing::info!("Hotkey triggered: {hotkey_for_log}");
                 on_trigger();
             }
-        }).ok();
-
-        let mut registered = self.registered.lock().unwrap();
-        if let Some(old) = registered.take() {
-            app.global_shortcut().unregister(old).ok();
+        }) {
+            Ok(()) => {
+                tracing::info!("Hotkey registered: {}", hotkey_str);
+            }
+            Err(e) => {
+                tracing::error!("Failed to register hotkey '{}': {}", hotkey_str, e);
+                return;
+            }
         }
-        *registered = Some(shortcut);
-        tracing::info!("Hotkey registered: {}", hotkey_str);
+
+        // Store the registered shortcut for later unregistration
+        if let Ok(current) = hotkey_str.parse() {
+            let mut registered = self.registered.lock().unwrap();
+            *registered = Some(current);
+        }
     }
 
     pub fn unregister_all(&self, app: &AppHandle) {
         let mut registered = self.registered.lock().unwrap();
         if let Some(sc) = registered.take() {
-            app.global_shortcut().unregister(sc).ok();
+            if let Err(e) = app.global_shortcut().unregister(sc) {
+                tracing::warn!("Failed to unregister hotkey: {e}");
+            }
         }
     }
 }

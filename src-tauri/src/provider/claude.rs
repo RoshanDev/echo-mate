@@ -1,8 +1,8 @@
 use crate::domain::CandidateEnvelope;
+use crate::provider::wsl;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 pub struct ClaudeProvider {
@@ -30,32 +30,48 @@ impl ClaudeProvider {
         self
     }
 
-    /// Call Claude CLI to generate candidate replies
     pub async fn generate(&self, prompt: &str, schema: &serde_json::Value) -> anyhow::Result<CandidateEnvelope> {
         tracing::info!("ClaudeProvider::generate called, binary={}, timeout={:?}", self.binary, self.timeout);
-        tracing::debug!("Prompt (first 300 chars): {}", &prompt[..std::cmp::min(300, prompt.len())]);
 
-        // Ensure workspace exists
         tokio::fs::create_dir_all(&self.workspace).await?;
-
         let schema_str = serde_json::to_string(schema)?;
-        tracing::debug!("Schema length: {} bytes", schema_str.len());
 
-        let mut child = Command::new(&self.binary)
-            .arg("-p")
+        let mut cmd = wsl::wsl_command(&self.binary);
+        cmd.arg("-p")
             .arg("--output-format").arg("json")
-            .arg("--json-schema").arg(&schema_str)
             .arg("--no-session-persistence")
-            .arg("--max-turns").arg("10")
-            .arg(prompt)
-            .stdin(Stdio::piped())
+            .arg("--max-turns").arg("10");
+
+        if wsl::is_windows() {
+            // Write schema to Windows temp dir, read via /mnt/c/ inside WSL2.
+            // This avoids both UNC path issues AND wsl.exe JSON quote mangling.
+            let schema_file = self.workspace.join("schema.json");
+            std::fs::write(&schema_file, &schema_str)?;
+            let wsl_schema_path = wsl::to_wsl_path(&schema_file);
+
+            let wsl_binary = wsl::wsl_binary_path(&self.binary);
+            let shell_cmd = format!(
+                r#"{} -p --output-format json --json-schema "$(cat {})" --no-session-persistence --max-turns 10 "$@""#,
+                wsl_binary, wsl_schema_path.display()
+            );
+            tracing::info!("Shell: {}", shell_cmd);
+            cmd = wsl::new_wsl_command();
+            cmd.arg("bash").arg("-c").arg(&shell_cmd);
+            cmd.arg("--");
+            cmd.arg(prompt);
+        } else {
+            cmd.arg("--json-schema").arg(&schema_str);
+            cmd.arg(prompt);
+            cmd.current_dir(&self.workspace);
+        }
+
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .current_dir(&self.workspace)
-            .spawn()?;
+            .kill_on_drop(true);
 
-        // Close stdin immediately (no stdin input)
+        let mut child = cmd.spawn()?;
+
         if let Some(stdin) = child.stdin.take() {
             drop(stdin);
         }
@@ -87,40 +103,33 @@ impl ClaudeProvider {
         let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::info!("Claude stdout length: {} bytes", stdout.len());
 
-        // Dump raw output for debugging
-        let debug_path = std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(".echomate")
-            .join("logs")
-            .join("last-claude-output.json");
-        let _ = std::fs::write(&debug_path, stdout.as_bytes());
+        let debug_dir = std::env::temp_dir().join("echomate-claude");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let _ = std::fs::write(debug_dir.join("last-claude-output.json"), stdout.as_bytes());
 
         parse_json_output(&stdout)
     }
 }
 
-/// Parse --output-format json output from Claude CLI.
-/// The result is a single JSON object with "structured_output" and "result" fields.
 fn parse_json_output(stdout: &str) -> anyhow::Result<CandidateEnvelope> {
     let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Claude returned empty output");
+    }
     tracing::info!("Claude raw output (first 500 chars): {}", &trimmed[..std::cmp::min(500, trimmed.len())]);
 
     let wrapped: serde_json::Value = serde_json::from_str(trimmed)
         .map_err(|e| anyhow::anyhow!("Claude output not valid JSON: {}. Raw: {}", e, &trimmed[..std::cmp::min(300, trimmed.len())]))?;
 
-    // Primary: "structured_output" from --json-schema
     if let Some(so) = wrapped.get("structured_output") {
         if !so.is_null() {
             if let Ok(env) = serde_json::from_value::<CandidateEnvelope>(so.clone()) {
                 tracing::info!("Parsed candidates from structured_output");
                 return Ok(env);
             }
-            tracing::warn!("structured_output present but failed to parse as CandidateEnvelope: {}", so);
         }
     }
 
-    // Fallback: "result" field (may contain JSON string)
     if let Some(result_val) = wrapped.get("result") {
         if !result_val.is_null() {
             if let Ok(env) = serde_json::from_value::<CandidateEnvelope>(result_val.clone()) {
@@ -128,12 +137,10 @@ fn parse_json_output(stdout: &str) -> anyhow::Result<CandidateEnvelope> {
                 return Ok(env);
             }
             if let Some(s) = result_val.as_str() {
-                // Try direct parse
                 if let Ok(env) = serde_json::from_str::<CandidateEnvelope>(s) {
                     tracing::info!("Parsed candidates from result field (string)");
                     return Ok(env);
                 }
-                // Try finding JSON within the text
                 if let Some(start) = s.find('{') {
                     if let Some(end) = s.rfind('}') {
                         if let Ok(env) = serde_json::from_str::<CandidateEnvelope>(&s[start..=end]) {
@@ -147,9 +154,8 @@ fn parse_json_output(stdout: &str) -> anyhow::Result<CandidateEnvelope> {
     }
 
     anyhow::bail!(
-        "Failed to parse CandidateEnvelope. Keys: {:?}. structured_output: {}. result(first 300): {:.300}",
+        "Failed to parse CandidateEnvelope. Keys: {:?}. result(first 300): {:.300}",
         wrapped.as_object().map(|o| o.keys().collect::<Vec<_>>()).unwrap_or_default(),
-        wrapped.get("structured_output").map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
         wrapped.get("result").and_then(|v| v.as_str()).unwrap_or(""),
     )
 }

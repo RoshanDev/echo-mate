@@ -6,6 +6,9 @@ import { listen } from './lib/@tauri-apps/api/event.js';
 let currentCandidates = [];
 let currentProvider = 'codex';
 
+// Card color palette — cycles through 5 tints
+const CARD_COLORS = ['card-green', 'card-blue', 'card-purple', 'card-coral', 'card-pink'];
+
 // ≡≡≡ Safe invoke wrapper ≡≡≡
 async function safeInvoke(cmd, args) {
   try {
@@ -47,6 +50,8 @@ function setupButtons() {
 // ≡≡≡ Event Handlers ≡≡≡
 function handleGenerationStarted() {
   showLoading();
+  const dot = document.getElementById('status-dot');
+  if (dot) dot.classList.add('active');
 }
 
 function handleCandidatesReady(event) {
@@ -54,11 +59,14 @@ function handleCandidatesReady(event) {
   currentCandidates = data.candidates || [];
   currentProvider = data.provider || 'codex';
 
-  document.getElementById('status-text').textContent = '来信已读取（剪贴板）';
+  document.getElementById('status-text').textContent = '已生成 ' + currentCandidates.length + ' 条候选回复';
+  const dot = document.getElementById('status-dot');
+  if (dot) dot.classList.remove('active');
+
   const modeIndicator = document.getElementById('mode-indicator');
   modeIndicator.style.display = 'flex';
-  document.getElementById('mode-label').textContent = '模式：' + (data.mode || 'standard');
-  document.getElementById('provider-label').textContent = 'Provider: ' + currentProvider;
+  document.getElementById('mode-label').textContent = (data.mode || 'standard');
+  document.getElementById('provider-label').textContent = currentProvider.toUpperCase();
 
   const badge = document.getElementById('provider-badge');
   badge.style.display = 'inline';
@@ -70,6 +78,9 @@ function handleCandidatesReady(event) {
 }
 
 function handleError(event) {
+  const dot = document.getElementById('status-dot');
+  if (dot) dot.classList.remove('active');
+
   let msg = '未知错误';
   if (typeof event.payload === 'string') {
     msg = event.payload;
@@ -86,7 +97,7 @@ function renderCandidates(candidates) {
 
   candidates.forEach((c, i) => {
     const card = document.createElement('div');
-    card.className = 'candidate-card';
+    card.className = 'candidate-card ' + CARD_COLORS[i % CARD_COLORS.length];
 
     let tagsHtml = renderTags(c.style_tags || (c.tone ? [c.tone] : []));
     if (c.risk_flags && c.risk_flags.length > 0 && c.risk_flags[0] !== 'none') {
@@ -94,7 +105,7 @@ function renderCandidates(candidates) {
     }
 
     card.innerHTML =
-      '<div class="candidate-index">候选 ' + (i + 1) + '</div>' +
+      '<div class="candidate-index">候选 ' + (i + 1) + (c.reason ? ' — ' + escapeHtml(c.reason) : '') + '</div>' +
       '<div class="candidate-text">' + escapeHtml(c.text) + '</div>' +
       '<div class="candidate-meta">' +
         '<div class="candidate-tags">' + tagsHtml + '</div>' +
@@ -107,6 +118,9 @@ function renderCandidates(candidates) {
       e.stopPropagation();
       copyCandidate(i, c.text);
     });
+
+    // Click card to copy
+    card.addEventListener('click', () => copyCandidate(i, c.text));
   });
 }
 
@@ -136,6 +150,12 @@ async function copyCandidate(index, text) {
         btn.classList.remove('copied');
       }, 1500);
     }
+
+    // Highlight the selected card
+    const cards = document.querySelectorAll('.candidate-card');
+    cards.forEach(c => c.classList.remove('selected'));
+    if (cards[index]) cards[index].classList.add('selected');
+
     safeInvoke('record_copy', { candidateIndex: index }).catch(() => {});
     setTimeout(() => safeInvoke('hide_window').catch(() => {}), 800);
   } catch (err) {
@@ -159,7 +179,7 @@ function hideLoading() {
 function showError(msg) {
   document.getElementById('loading').style.display = 'none';
   document.getElementById('error-msg').style.display = 'block';
-  document.getElementById('error-msg').textContent = '❌ ' + msg;
+  document.getElementById('error-msg').textContent = msg;
   document.getElementById('status-text').textContent = '生成失败';
   setTimeout(() => {
     document.getElementById('error-msg').style.display = 'none';

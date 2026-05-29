@@ -58,14 +58,69 @@ pub struct Orchestrator {
 impl Orchestrator {
     pub fn new() -> Self {
         let schema_dir = std::env::temp_dir().join("echomate-schemas");
+        let config = Self::load_config();
+        tracing::info!("Config loaded: hotkey={}, provider={}", config.hotkey, config.primary_provider);
         Self {
-            config: Arc::new(Mutex::new(AppConfig::default())),
+            config: Arc::new(Mutex::new(config)),
             hotkey: HotkeyManager::new(),
             clipboard: ClipboardManager::new(),
             window: WindowManager::new(),
             prompt_composer: PromptComposer::new(),
             parser: OutputParser::new(),
             schema_dir,
+        }
+    }
+
+    fn config_path() -> PathBuf {
+        // On Windows: %APPDATA%\EchoMate\config.json
+        // On Linux/macOS: ~/.echomate/config.json
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return PathBuf::from(appdata).join("EchoMate").join("config.json");
+        }
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
+        PathBuf::from(home).join(".echomate").join("config.json")
+    }
+
+    fn load_config() -> AppConfig {
+        let path = Self::config_path();
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                match serde_json::from_str::<AppConfig>(&content) {
+                    Ok(config) => {
+                        tracing::info!("Loaded config from {}", path.display());
+                        return config;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse config file {}: {e}, using defaults", path.display());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::info!("No config file at {} ({e}), using defaults", path.display());
+            }
+        }
+        AppConfig::default()
+    }
+
+    pub fn save_config_to_disk(&self) {
+        let config = self.config.lock().unwrap().clone();
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&config) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, &json) {
+                    tracing::error!("Failed to write config to {}: {e}", path.display());
+                } else {
+                    tracing::info!("Config saved to {}", path.display());
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize config: {e}");
+            }
         }
     }
 
@@ -148,21 +203,27 @@ impl Orchestrator {
 
     pub fn init(&self, app: &AppHandle) {
         let config = self.config.lock().unwrap().clone();
+        self.register_hotkey(app, &config.hotkey);
+        tracing::info!("Orchestrator initialized with provider: {}", config.primary_provider);
+    }
 
-        // Clone what we need for the closure
+    pub fn reload_hotkey(&self, app: &AppHandle) {
+        let config = self.config.lock().unwrap().clone();
+        self.register_hotkey(app, &config.hotkey);
+        tracing::info!("Hotkey reloaded: {}", config.hotkey);
+    }
+
+    fn register_hotkey(&self, app: &AppHandle, hotkey_str: &str) {
         let app_handle = app.clone();
-        self.hotkey.register(app, &config.hotkey, move || {
+        self.hotkey.register(app, hotkey_str, move || {
             let app = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                // Access orchestrator through app state
                 let state = app.state::<OrchestratorState>();
                 if let Err(e) = state.0.trigger(&app).await {
                     tracing::error!("Orchestrator trigger error: {}", e);
                 }
             });
         });
-
-        tracing::info!("Orchestrator initialized with provider: {}", config.primary_provider);
     }
 }
 

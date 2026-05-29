@@ -103,11 +103,16 @@ pub async fn get_settings(
 /// Save settings
 #[tauri::command]
 pub async fn save_settings(
+    app: AppHandle,
     state: State<'_, OrchestratorState>,
     settings: AppConfig,
 ) -> Result<(), String> {
-    let mut config = state.0.config.lock().unwrap();
-    *config = settings;
+    {
+        let mut config = state.0.config.lock().unwrap();
+        *config = settings;
+    }
+    state.0.reload_hotkey(&app);
+    state.0.save_config_to_disk();
     tracing::info!("Settings saved");
     Ok(())
 }
@@ -115,10 +120,15 @@ pub async fn save_settings(
 /// Reset settings to defaults
 #[tauri::command]
 pub async fn reset_settings(
+    app: AppHandle,
     state: State<'_, OrchestratorState>,
 ) -> Result<(), String> {
-    let mut config = state.0.config.lock().unwrap();
-    *config = AppConfig::default();
+    {
+        let mut config = state.0.config.lock().unwrap();
+        *config = AppConfig::default();
+    }
+    state.0.reload_hotkey(&app);
+    state.0.save_config_to_disk();
     tracing::info!("Settings reset to defaults");
     Ok(())
 }

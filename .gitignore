@@ -22,3 +22,10 @@ target
 node_modules/
 
 #.idea/
+
+# Local dev artifacts
+.cargo/
+.codegraph/
+.echomate/
+.playwright-mcp/
+.claude/

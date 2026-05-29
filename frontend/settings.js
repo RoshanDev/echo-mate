@@ -73,15 +73,64 @@ function setupSettingsButtons() {
 
   document.getElementById('btn-record-hotkey').addEventListener('click', () => {
     const btn = document.getElementById('btn-record-hotkey');
-    btn.textContent = '按下热键...';
-    btn.style.background = 'var(--warning)';
-    safeInvoke('record_hotkey').then(hotkey => {
-      if (hotkey) document.getElementById('setting-hotkey').value = hotkey;
-      btn.textContent = '录制';
-      btn.style.background = '';
-    }).catch(() => {
-      btn.textContent = '录制';
-      btn.style.background = '';
-    });
+    const input = document.getElementById('setting-hotkey');
+
+    if (btn.dataset.recording === 'true') {
+      // Cancel recording
+      stopRecording(btn);
+      return;
+    }
+
+    // Start recording
+    btn.textContent = '按下组合键... (Esc 取消)';
+    btn.style.background = 'var(--accent)';
+    btn.style.color = '#fff';
+    btn.dataset.recording = 'true';
+
+    function onKeyDown(e) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.key === 'Escape') {
+        stopRecording(btn);
+        return;
+      }
+
+      // Ignore lone modifier keys
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+
+      const parts = [];
+      if (e.metaKey || e.ctrlKey) parts.push('CmdOrCtrl');
+      if (e.altKey) parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+
+      // Normalize key name
+      let key = e.key;
+      if (key.length === 1) {
+        key = key.toUpperCase();
+      } else if (key === ' ') {
+        key = 'Space';
+      } else {
+        // Capitalize first letter for named keys
+        key = key.charAt(0).toUpperCase() + key.slice(1);
+      }
+
+      parts.push(key);
+      const hotkey = parts.join('+');
+      input.value = hotkey;
+
+      stopRecording(btn);
+    }
+
+    function stopRecording(b) {
+      b.textContent = '录制';
+      b.style.background = '';
+      b.style.color = '';
+      b.dataset.recording = 'false';
+      document.removeEventListener('keydown', onKeyDown, true);
+    }
+
+    btn._stopFn = () => stopRecording(btn);
+    document.addEventListener('keydown', onKeyDown, true);
   });
 }
