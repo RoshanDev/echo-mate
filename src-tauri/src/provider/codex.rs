@@ -79,7 +79,7 @@ impl CodexProvider {
             })
             .collect::<Vec<_>>();
 
-        let mut cmd = wsl::wsl_command(&self.binary);
+        let mut cmd = wsl::codex_command(&self.binary);
         cmd.arg("exec")
             .arg("--sandbox")
             .arg("read-only")
