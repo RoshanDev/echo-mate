@@ -38,6 +38,9 @@ keyring = "3"
 # Input simulation (Ctrl/Cmd+C)
 enigo = "0.3"
 
+# Screenshot encoding
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

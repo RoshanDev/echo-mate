@@ -773,6 +773,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "enigo",
+ "image",
  "keyring",
  "rusqlite",
  "serde",

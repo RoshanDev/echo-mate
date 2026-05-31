@@ -83,4 +83,34 @@ impl PromptComposer {
 - 不要带"哈哈哈哈哈哈"这类过度表达"#
         )
     }
+
+    /// Build the task prompt for a screenshot-based chat context.
+    pub fn screenshot_task_prompt(
+        &self,
+        image_width: u32,
+        image_height: u32,
+        tone: &str,
+        length: &str,
+        emoji_level: f64,
+        humor_level: f64,
+    ) -> String {
+        let base = self.task_prompt(
+            "见随附聊天截图。请按截图中的视觉方向读取上下文：左侧气泡是对方说的话，右侧气泡是我说的话。重点理解最近几轮对话，尤其是最后一条对方消息，再生成我可以继续发送的回复。",
+            tone,
+            length,
+            emoji_level,
+            humor_level,
+        );
+
+        format!(
+            r#"{base}
+
+截图上下文：
+- 图片尺寸：{image_width}x{image_height}
+- 左侧消息代表对方，右侧消息代表我
+- 先结合双方上下文判断关系、语气和当前话题
+- 不要把截图内容逐字转写给用户
+- 如果截图中文字不完整或难以辨认，生成安全、轻量、可继续推进对话的回复"#
+        )
+    }
 }

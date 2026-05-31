@@ -11,6 +11,15 @@ pub async fn generate_replies(
     state.0.trigger(&app).await.map(|_| ())
 }
 
+/// Generate replies from a chat context screenshot.
+#[tauri::command]
+pub async fn generate_replies_from_screenshot(
+    app: AppHandle,
+    state: State<'_, OrchestratorState>,
+) -> Result<(), String> {
+    state.0.trigger_from_screenshot(&app).await.map(|_| ())
+}
+
 /// Regenerate with a style modifier
 #[tauri::command]
 pub async fn regenerate_candidates(

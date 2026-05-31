@@ -2,14 +2,18 @@ use crate::agent::parser::OutputParser;
 use crate::agent::schema;
 use crate::agent::PromptComposer;
 use crate::domain::CandidateEnvelope;
-use crate::platform::clipboard::ClipboardManager;
+use crate::platform::clipboard::{ClipboardImage, ClipboardManager};
 use crate::platform::hotkey::HotkeyManager;
 use crate::platform::input::InputSimulator;
+use crate::platform::screenshot::ScreenCapture;
 use crate::provider::claude::ClaudeProvider;
 use crate::provider::codex::CodexProvider;
 use crate::ui::window::WindowManager;
+use image::{ImageBuffer, ImageFormat, Rgba};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +22,8 @@ use tauri::{AppHandle, Emitter, Manager};
 const SELECTION_COPY_SETTLE: Duration = Duration::from_millis(250);
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLIPBOARD_POLL_ATTEMPTS: usize = 40;
+const SCREENSHOT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SCREENSHOT_POLL_ATTEMPTS: usize = 240;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -57,6 +63,7 @@ pub struct Orchestrator {
     hotkey: HotkeyManager,
     clipboard: ClipboardManager,
     input: InputSimulator,
+    screen_capture: ScreenCapture,
     window: WindowManager,
     prompt_composer: PromptComposer,
     parser: OutputParser,
@@ -78,6 +85,7 @@ impl Orchestrator {
             hotkey: HotkeyManager::new(),
             clipboard: ClipboardManager::new(),
             input: InputSimulator::new(),
+            screen_capture: ScreenCapture::new(),
             window: WindowManager::new(),
             prompt_composer: PromptComposer::new(),
             parser: OutputParser::new(),
@@ -151,6 +159,71 @@ impl Orchestrator {
         self.trigger_inner(app, TriggerInput::Selection).await
     }
 
+    pub async fn trigger_from_screenshot(
+        &self,
+        app: &AppHandle,
+    ) -> Result<CandidateEnvelope, String> {
+        if self.generation_in_progress.swap(true, Ordering::AcqRel) {
+            let message = "已有一次生成正在进行，请等当前请求完成或超时后再试".to_string();
+            self.emit_generation_error(app, &message);
+            return Err(message);
+        }
+        let _generation_guard = GenerationGuard::new(&self.generation_in_progress);
+
+        let screenshot = match self.capture_chat_screenshot(app).await {
+            Ok(screenshot) => screenshot,
+            Err(e) => {
+                self.emit_generation_error(app, &e);
+                return Err(e);
+            }
+        };
+
+        tracing::info!(
+            "Screenshot context captured: {} ({}x{})",
+            screenshot.path.display(),
+            screenshot.width,
+            screenshot.height
+        );
+
+        let _ = app.emit(
+            "generation-started",
+            serde_json::json!({
+                "length": 0,
+                "source": "screenshot",
+                "width": screenshot.width,
+                "height": screenshot.height,
+            }),
+        );
+
+        let config = self.config.lock().unwrap().clone();
+        let system_prompt = self.prompt_composer.system_prompt();
+        let task_prompt = self.prompt_composer.screenshot_task_prompt(
+            screenshot.width,
+            screenshot.height,
+            &config.tone,
+            &config.length,
+            config.emoji_level,
+            config.humor_level,
+        );
+        let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, task_prompt);
+
+        let (schema_path, _schema_json) = self.write_schema().await?;
+        let result = self
+            .call_screenshot_provider(&config, &full_prompt, &schema_path, &screenshot.path)
+            .await;
+
+        match result {
+            Ok((envelope, provider)) => {
+                self.emit_candidates_ready(app, &envelope, &provider, "screenshot");
+                Ok(envelope)
+            }
+            Err(e) => {
+                self.emit_generation_error(app, &e);
+                Err(e)
+            }
+        }
+    }
+
     async fn trigger_inner(
         &self,
         app: &AppHandle,
@@ -194,6 +267,25 @@ impl Orchestrator {
         );
         let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, task_prompt);
 
+        let (schema_path, schema_json) = self.write_schema().await?;
+
+        let result = self
+            .call_provider(&config, &full_prompt, &schema_json, &schema_path)
+            .await;
+
+        match result {
+            Ok(envelope) => {
+                self.emit_candidates_ready(app, &envelope, &config.primary_provider, "standard");
+                Ok(envelope)
+            }
+            Err(e) => {
+                self.emit_generation_error(app, &e);
+                Err(e)
+            }
+        }
+    }
+
+    async fn write_schema(&self) -> Result<(PathBuf, serde_json::Value), String> {
         tokio::fs::create_dir_all(&self.schema_dir)
             .await
             .map_err(|e| e.to_string())?;
@@ -205,32 +297,28 @@ impl Orchestrator {
         )
         .await
         .map_err(|e| e.to_string())?;
+        Ok((schema_path, schema_json))
+    }
 
-        let result = self
-            .call_provider(&config, &full_prompt, &schema_json, &schema_path)
-            .await;
-
-        match result {
-            Ok(envelope) => {
-                if let Err(errs) = self.parser.validate(&envelope) {
-                    tracing::warn!("Validation warnings: {:?}", errs);
-                }
-                let _ = app.emit(
-                    "candidates-ready",
-                    serde_json::json!({
-                        "candidates": &envelope.candidates,
-                        "provider": &config.primary_provider,
-                        "mode": "standard",
-                    }),
-                );
-                self.window.show_popup(app);
-                Ok(envelope)
-            }
-            Err(e) => {
-                self.emit_generation_error(app, &e);
-                Err(e)
-            }
+    fn emit_candidates_ready(
+        &self,
+        app: &AppHandle,
+        envelope: &CandidateEnvelope,
+        provider: &str,
+        mode: &str,
+    ) {
+        if let Err(errs) = self.parser.validate(envelope) {
+            tracing::warn!("Validation warnings: {:?}", errs);
         }
+        let _ = app.emit(
+            "candidates-ready",
+            serde_json::json!({
+                "candidates": &envelope.candidates,
+                "provider": provider,
+                "mode": mode,
+            }),
+        );
+        self.window.show_popup(app);
     }
 
     async fn read_trigger_text(
@@ -293,6 +381,91 @@ impl Orchestrator {
         Err("没有检测到选中的文本内容。请确认当前应用支持 Ctrl+C 复制文本；也可以手动复制后点击“生成回复”。".into())
     }
 
+    async fn capture_chat_screenshot(&self, app: &AppHandle) -> Result<ScreenshotInput, String> {
+        let previous_signature = self
+            .clipboard
+            .read_image(app)
+            .ok()
+            .map(|image| image_signature(&image));
+
+        self.window.hide_popup(app);
+        let launched = self.screen_capture.start_region_capture()?;
+        if launched {
+            return self
+                .wait_for_new_clipboard_image(app, previous_signature)
+                .await;
+        }
+
+        let image = self.clipboard.read_image(app).map_err(|_| {
+            "没有检测到剪贴板截图。请先用系统截图工具截取聊天上下文，再点击“截图上下文”。"
+                .to_string()
+        })?;
+        self.persist_screenshot(image).await
+    }
+
+    async fn wait_for_new_clipboard_image(
+        &self,
+        app: &AppHandle,
+        previous_signature: Option<u64>,
+    ) -> Result<ScreenshotInput, String> {
+        let mut last_error = None;
+        for attempt in 0..SCREENSHOT_POLL_ATTEMPTS {
+            tokio::time::sleep(SCREENSHOT_POLL_INTERVAL).await;
+
+            let image = match self.clipboard.read_image(app) {
+                Ok(image) => image,
+                Err(e) => {
+                    last_error = Some(e);
+                    tracing::debug!(
+                        "Clipboard image not ready after screenshot, retrying: attempt {}/{}",
+                        attempt + 1,
+                        SCREENSHOT_POLL_ATTEMPTS
+                    );
+                    continue;
+                }
+            };
+
+            let signature = image_signature(&image);
+            if previous_signature.map_or(true, |previous| previous != signature) {
+                return self.persist_screenshot(image).await;
+            }
+        }
+
+        if let Some(e) = last_error {
+            tracing::warn!("Clipboard image stayed unreadable after screenshot request: {e}");
+        }
+        Err(
+            "没有检测到新的聊天截图。请完成框选，或先用 Win+Shift+S 截图后再点击“截图上下文”。"
+                .into(),
+        )
+    }
+
+    async fn persist_screenshot(&self, image: ClipboardImage) -> Result<ScreenshotInput, String> {
+        let expected_len = image.width as usize * image.height as usize * 4;
+        if image.rgba.len() != expected_len {
+            return Err("截图像素数据不完整，无法生成上下文。请重新截图。".into());
+        }
+
+        let dir = std::env::temp_dir().join("echomate-screenshots");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| format!("无法创建截图缓存目录：{e}"))?;
+
+        let path = dir.join(format!("chat-context-{}.png", timestamp_nanos()));
+        let buffer =
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(image.width, image.height, image.rgba)
+                .ok_or_else(|| "截图像素数据无法编码。请重新截图。".to_string())?;
+        buffer
+            .save_with_format(&path, ImageFormat::Png)
+            .map_err(|e| format!("无法保存截图上下文：{e}"))?;
+
+        Ok(ScreenshotInput {
+            path,
+            width: image.width,
+            height: image.height,
+        })
+    }
+
     fn emit_generation_error(&self, app: &AppHandle, message: &str) {
         let _ = app.emit("generation-error", serde_json::json!({"message": message}));
         self.window.show_popup(app);
@@ -327,6 +500,37 @@ impl Orchestrator {
             }
             _ => Err(format!("Unknown provider: {}", config.primary_provider)),
         }
+    }
+
+    async fn call_screenshot_provider(
+        &self,
+        config: &AppConfig,
+        prompt: &str,
+        schema_path: &PathBuf,
+        image_path: &Path,
+    ) -> Result<(CandidateEnvelope, String), String> {
+        if config.primary_provider != "codex" {
+            tracing::info!(
+                "Screenshot context uses Codex image input instead of configured provider {}",
+                config.primary_provider
+            );
+        }
+
+        let provider = CodexProvider::new().with_timeout(config.timeout_seconds);
+        provider
+            .generate_with_images(prompt, schema_path, &[image_path.to_path_buf()])
+            .await
+            .map(|envelope| (envelope, "codex".to_string()))
+            .map_err(|e| {
+                let message = Self::friendly_provider_error("Codex", e);
+                if config.primary_provider == "codex" {
+                    message
+                } else {
+                    format!(
+                        "截图上下文目前需要 Codex 的图片输入能力，已自动改用 Codex。\n{message}"
+                    )
+                }
+            })
     }
 
     fn friendly_provider_error(provider: &str, error: anyhow::Error) -> String {
@@ -390,6 +594,12 @@ enum TriggerInput {
     Selection,
 }
 
+struct ScreenshotInput {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+}
+
 struct GenerationGuard<'a> {
     flag: &'a AtomicBool,
 }
@@ -418,9 +628,24 @@ fn truncate_error(raw: &str) -> String {
 }
 
 fn clipboard_probe_marker() -> String {
-    let nanos = SystemTime::now()
+    format!(
+        "ECHOMATE_COPY_PROBE_{}_{}",
+        std::process::id(),
+        timestamp_nanos()
+    )
+}
+
+fn timestamp_nanos() -> u128 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("ECHOMATE_COPY_PROBE_{}_{}", std::process::id(), nanos)
+        .unwrap_or_default()
+}
+
+fn image_signature(image: &ClipboardImage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    image.width.hash(&mut hasher);
+    image.height.hash(&mut hasher);
+    image.rgba.hash(&mut hasher);
+    hasher.finish()
 }

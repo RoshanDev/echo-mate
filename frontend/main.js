@@ -9,7 +9,12 @@ let isGenerating = false;
 
 // Card color palette — cycles through 5 tints
 const CARD_COLORS = ['card-green', 'card-blue', 'card-purple', 'card-coral', 'card-pink'];
-const GENERATION_COMMANDS = new Set(['generate_replies', 'regenerate_candidates', 'regenerate_with_style']);
+const GENERATION_COMMANDS = new Set([
+  'generate_replies',
+  'generate_replies_from_screenshot',
+  'regenerate_candidates',
+  'regenerate_with_style'
+]);
 
 // ≡≡≡ Safe invoke wrapper ≡≡≡
 async function safeInvoke(cmd, args) {
@@ -45,17 +50,25 @@ function setupButtons() {
   if (testBtn) {
     testBtn.addEventListener('click', () => triggerGeneration('generate_replies'));
   }
+
+  const screenshotBtn = document.getElementById('btn-screenshot-generate');
+  if (screenshotBtn) {
+    screenshotBtn.addEventListener('click', () => {
+      triggerGeneration('generate_replies_from_screenshot', undefined, '框选聊天截图...');
+    });
+  }
 }
 
-function triggerGeneration(cmd, args) {
+function triggerGeneration(cmd, args, loadingText) {
   if (isGenerating) return;
-  showLoading();
+  showLoading(loadingText);
   safeInvoke(cmd, args).catch(() => {});
 }
 
 // ≡≡≡ Event Handlers ≡≡≡
-function handleGenerationStarted() {
-  showLoading();
+function handleGenerationStarted(event) {
+  const source = event.payload?.source;
+  showLoading(source === 'screenshot' ? '正在理解聊天截图...' : undefined);
   const dot = document.getElementById('status-dot');
   if (dot) dot.classList.add('active');
 }
@@ -172,13 +185,13 @@ async function copyCandidate(index, text) {
 }
 
 // ≡≡≡ Loading/Error UI ≡≡≡
-function showLoading() {
+function showLoading(label) {
   setGenerating(true);
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('candidates-list').innerHTML = '';
   document.getElementById('error-msg').style.display = 'none';
   document.getElementById('actions').style.display = 'none';
-  document.getElementById('status-text').textContent = '正在生成候选回复...';
+  document.getElementById('status-text').textContent = label || '正在生成候选回复...';
 }
 
 function hideLoading() {
@@ -198,7 +211,7 @@ function showError(msg) {
 
 function setGenerating(active) {
   isGenerating = active;
-  ['btn-test-generate', 'btn-regenerate', 'btn-conservative', 'btn-fun'].forEach((id) => {
+  ['btn-test-generate', 'btn-screenshot-generate', 'btn-regenerate', 'btn-conservative', 'btn-fun'].forEach((id) => {
     const btn = document.getElementById(id);
     if (btn) btn.disabled = active;
   });

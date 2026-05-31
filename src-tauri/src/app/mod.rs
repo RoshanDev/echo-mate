@@ -33,6 +33,7 @@ pub fn run() {
         .manage(OrchestratorState(orchestrator))
         .invoke_handler(tauri::generate_handler![
             ui::commands::generate_replies,
+            ui::commands::generate_replies_from_screenshot,
             ui::commands::regenerate_candidates,
             ui::commands::regenerate_with_style,
             ui::commands::record_copy,

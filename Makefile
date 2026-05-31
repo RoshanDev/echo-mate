@@ -30,12 +30,12 @@ sync-win:
 	cp -a src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json "$$WIN_PROJECT_WSL/src-tauri/"; \
 	cp -a frontend/. "$$WIN_PROJECT_WSL/frontend/"
 
-# Build Windows binary (after sync-win)
-win-build:
+# Build Windows binary
+win-build: sync-win
 	powershell.exe -Command '$$env:PATH="$$env:USERPROFILE\.cargo\bin;C:\Strawberry\perl\bin;$$env:PATH"; Get-Process -Name "echo-mate" -ErrorAction SilentlyContinue | Stop-Process -Force; cd "$$env:USERPROFILE\echo-mate\src-tauri"; cargo build --release'
 
 # Sync + build + run on Windows
-win-run: sync-win win-build
+win-run: win-build
 	powershell.exe -Command 'Get-Process -Name "echo-mate" -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 1; Start-Process "$$env:USERPROFILE\echo-mate\src-tauri\target\release\echo-mate.exe"; Write-Host "EchoMate Windows launched. Global hotkey should work now."'
 
 # Tauri dev mode (hot-reload for UI work)
