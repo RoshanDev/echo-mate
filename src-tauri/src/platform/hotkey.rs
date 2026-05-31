@@ -1,6 +1,6 @@
+use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-use std::sync::Mutex;
 
 const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Shift+Space";
 
@@ -10,7 +10,9 @@ pub struct HotkeyManager {
 
 impl HotkeyManager {
     pub fn new() -> Self {
-        Self { registered: Mutex::new(None) }
+        Self {
+            registered: Mutex::new(None),
+        }
     }
 
     pub fn register<F>(&self, app: &AppHandle, hotkey_str: &str, on_trigger: F)
@@ -34,12 +36,14 @@ impl HotkeyManager {
 
         // Register the new shortcut
         let hotkey_for_log = hotkey_str.to_string();
-        match app.global_shortcut().on_shortcut(shortcut, move |_app, _sc, event| {
-            if event.state == ShortcutState::Pressed {
-                tracing::info!("Hotkey triggered: {hotkey_for_log}");
-                on_trigger();
-            }
-        }) {
+        match app
+            .global_shortcut()
+            .on_shortcut(shortcut, move |_app, _sc, event| {
+                if event.state == ShortcutState::Released {
+                    tracing::info!("Hotkey released, triggering: {hotkey_for_log}");
+                    on_trigger();
+                }
+            }) {
             Ok(()) => {
                 tracing::info!("Hotkey registered: {}", hotkey_str);
             }

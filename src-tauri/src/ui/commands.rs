@@ -1,5 +1,6 @@
 use crate::agent::orchestrator::{AppConfig, OrchestratorState};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 /// Generate replies from clipboard text
 #[tauri::command]
@@ -51,12 +52,30 @@ pub async fn regenerate_with_style(
 
 /// Record that user copied a candidate
 #[tauri::command]
-pub async fn record_copy(
+pub async fn record_copy(app: AppHandle, candidate_index: usize) -> Result<(), String> {
+    tracing::info!("User copied candidate {}", candidate_index);
+    let _ = app.emit(
+        "copy-recorded",
+        serde_json::json!({"index": candidate_index}),
+    );
+    Ok(())
+}
+
+/// Copy a candidate through Tauri's clipboard plugin.
+#[tauri::command]
+pub async fn copy_candidate(
     app: AppHandle,
     candidate_index: usize,
+    text: String,
 ) -> Result<(), String> {
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| format!("Clipboard write error: {}", e))?;
     tracing::info!("User copied candidate {}", candidate_index);
-    let _ = app.emit("copy-recorded", serde_json::json!({"index": candidate_index}));
+    let _ = app.emit(
+        "copy-recorded",
+        serde_json::json!({"index": candidate_index}),
+    );
     Ok(())
 }
 
@@ -94,9 +113,7 @@ pub async fn show_popup(app: AppHandle) -> Result<(), String> {
 
 /// Get current settings
 #[tauri::command]
-pub async fn get_settings(
-    state: State<'_, OrchestratorState>,
-) -> Result<AppConfig, String> {
+pub async fn get_settings(state: State<'_, OrchestratorState>) -> Result<AppConfig, String> {
     Ok(state.0.config.lock().unwrap().clone())
 }
 
@@ -135,9 +152,7 @@ pub async fn reset_settings(
 
 /// Record a new hotkey (called when user presses record)
 #[tauri::command]
-pub async fn record_hotkey(
-    _app: AppHandle,
-) -> Result<String, String> {
+pub async fn record_hotkey(_app: AppHandle) -> Result<String, String> {
     // For MVP, return current hotkey — actual recording requires
     // listening for next keypress which is complex with global shortcuts
     Ok("CmdOrCtrl+Shift+Space".into())

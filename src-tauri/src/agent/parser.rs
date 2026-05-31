@@ -1,5 +1,5 @@
-use crate::domain::CandidateEnvelope;
 use crate::agent::schema;
+use crate::domain::CandidateEnvelope;
 
 /// Validate candidate envelope against the JSON Schema
 pub struct OutputParser;
@@ -30,7 +30,11 @@ impl OutputParser {
                 errors.push(format!("Candidate {}: empty text", i + 1));
             }
             if candidate.text.len() > 500 {
-                errors.push(format!("Candidate {}: text too long ({} chars)", i + 1, candidate.text.len()));
+                errors.push(format!(
+                    "Candidate {}: text too long ({} chars)",
+                    i + 1,
+                    candidate.text.len()
+                ));
             }
         }
 
@@ -46,14 +50,17 @@ impl OutputParser {
         let _schema = schema::candidate_schema();
 
         // Parse as JSON value first
-        let value: serde_json::Value = serde_json::from_str(output)
-            .map_err(|e| format!("Invalid JSON: {}", e))?;
+        let value: serde_json::Value =
+            serde_json::from_str(output).map_err(|e| format!("Invalid JSON: {}", e))?;
 
         // Try to extract candidates from various wrappers
         let candidates_value = if let Some(c) = value.get("candidates") {
             c.clone()
         } else if let Some(inner) = value.get("structured_output") {
-            inner.get("candidates").cloned().unwrap_or(serde_json::Value::Null)
+            inner
+                .get("candidates")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
         } else {
             serde_json::Value::Null
         };
@@ -63,8 +70,8 @@ impl OutputParser {
         }
 
         // Deserialize
-        let envelope: CandidateEnvelope = serde_json::from_value(value)
-            .map_err(|e| format!("Schema mismatch: {}", e))?;
+        let envelope: CandidateEnvelope =
+            serde_json::from_value(value).map_err(|e| format!("Schema mismatch: {}", e))?;
 
         Ok(envelope)
     }

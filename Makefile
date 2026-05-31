@@ -24,9 +24,11 @@ build:
 # Sync source to Windows project copy
 sync-win:
 	@echo "Syncing sources to Windows..."
-	-powershell.exe -Command "Copy-Item -Recurse -Force '\\wsl.localhost\Ubuntu-22.04\home\roshan\Developer\echo-mate\src-tauri\src\*' '$(WIN_PROJECT)\src-tauri\src\'"
-	-powershell.exe -Command "Copy-Item -Force '\\wsl.localhost\Ubuntu-22.04\home\roshan\Developer\echo-mate\src-tauri\tauri.conf.json' '$(WIN_PROJECT)\src-tauri\tauri.conf.json'"
-	-powershell.exe -Command "Copy-Item -Force '\\\\wsl.localhost\\Ubuntu-22.04\\home\\roshan\\Developer\\echo-mate\\frontend\\*' '$(WIN_PROJECT)\\frontend\\'"
+	@WIN_PROJECT_WSL="/mnt/c/Users/$$(powershell.exe -NoProfile -Command '$$env:USERNAME' 2>/dev/null | tr -d '\r')/echo-mate"; \
+	mkdir -p "$$WIN_PROJECT_WSL/src-tauri/src" "$$WIN_PROJECT_WSL/frontend"; \
+	cp -a src-tauri/src/. "$$WIN_PROJECT_WSL/src-tauri/src/"; \
+	cp -a src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json "$$WIN_PROJECT_WSL/src-tauri/"; \
+	cp -a frontend/. "$$WIN_PROJECT_WSL/frontend/"
 
 # Build Windows binary (after sync-win)
 win-build:

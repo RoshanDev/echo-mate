@@ -5,16 +5,19 @@ import { listen } from './lib/@tauri-apps/api/event.js';
 // State
 let currentCandidates = [];
 let currentProvider = 'codex';
+let isGenerating = false;
 
 // Card color palette — cycles through 5 tints
 const CARD_COLORS = ['card-green', 'card-blue', 'card-purple', 'card-coral', 'card-pink'];
+const GENERATION_COMMANDS = new Set(['generate_replies', 'regenerate_candidates', 'regenerate_with_style']);
 
 // ≡≡≡ Safe invoke wrapper ≡≡≡
 async function safeInvoke(cmd, args) {
   try {
     return args ? await invoke(cmd, args) : await invoke(cmd);
   } catch (err) {
-    showError(cmd + ' 失败: ' + (err?.message || err));
+    const msg = err?.message || err;
+    showError(GENERATION_COMMANDS.has(cmd) ? msg : (cmd + ' 失败: ' + msg));
     throw err;
   }
 }
@@ -34,17 +37,20 @@ document.addEventListener('DOMContentLoaded', () => {
 function setupButtons() {
   document.getElementById('btn-close').addEventListener('click', () => safeInvoke('hide_window'));
   document.getElementById('btn-settings').addEventListener('click', () => safeInvoke('open_settings'));
-  document.getElementById('btn-regenerate').addEventListener('click', () => safeInvoke('regenerate_candidates'));
-  document.getElementById('btn-conservative').addEventListener('click', () => safeInvoke('regenerate_with_style', { style: 'conservative' }));
-  document.getElementById('btn-fun').addEventListener('click', () => safeInvoke('regenerate_with_style', { style: 'fun' }));
+  document.getElementById('btn-regenerate').addEventListener('click', () => triggerGeneration('regenerate_candidates'));
+  document.getElementById('btn-conservative').addEventListener('click', () => triggerGeneration('regenerate_with_style', { style: 'conservative' }));
+  document.getElementById('btn-fun').addEventListener('click', () => triggerGeneration('regenerate_with_style', { style: 'fun' }));
 
   const testBtn = document.getElementById('btn-test-generate');
   if (testBtn) {
-    testBtn.addEventListener('click', () => {
-      showLoading();
-      safeInvoke('generate_replies').catch(() => {});
-    });
+    testBtn.addEventListener('click', () => triggerGeneration('generate_replies'));
   }
+}
+
+function triggerGeneration(cmd, args) {
+  if (isGenerating) return;
+  showLoading();
+  safeInvoke(cmd, args).catch(() => {});
 }
 
 // ≡≡≡ Event Handlers ≡≡≡
@@ -62,6 +68,7 @@ function handleCandidatesReady(event) {
   document.getElementById('status-text').textContent = '已生成 ' + currentCandidates.length + ' 条候选回复';
   const dot = document.getElementById('status-dot');
   if (dot) dot.classList.remove('active');
+  setGenerating(false);
 
   const modeIndicator = document.getElementById('mode-indicator');
   modeIndicator.style.display = 'flex';
@@ -80,6 +87,7 @@ function handleCandidatesReady(event) {
 function handleError(event) {
   const dot = document.getElementById('status-dot');
   if (dot) dot.classList.remove('active');
+  setGenerating(false);
 
   let msg = '未知错误';
   if (typeof event.payload === 'string') {
@@ -139,7 +147,7 @@ function escapeHtml(text) {
 // ≡≡≡ Copy ≡≡≡
 async function copyCandidate(index, text) {
   try {
-    await navigator.clipboard.writeText(text);
+    await safeInvoke('copy_candidate', { candidateIndex: index, text });
     const buttons = document.querySelectorAll('.copy-btn');
     const btn = buttons[index];
     if (btn) {
@@ -156,15 +164,16 @@ async function copyCandidate(index, text) {
     cards.forEach(c => c.classList.remove('selected'));
     if (cards[index]) cards[index].classList.add('selected');
 
-    safeInvoke('record_copy', { candidateIndex: index }).catch(() => {});
-    setTimeout(() => safeInvoke('hide_window').catch(() => {}), 800);
+    document.getElementById('status-text').textContent = '已复制候选 ' + (index + 1);
   } catch (err) {
     console.error('Copy failed:', err);
+    showError('复制失败: ' + (err?.message || err));
   }
 }
 
 // ≡≡≡ Loading/Error UI ≡≡≡
 function showLoading() {
+  setGenerating(true);
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('candidates-list').innerHTML = '';
   document.getElementById('error-msg').style.display = 'none';
@@ -177,6 +186,7 @@ function hideLoading() {
 }
 
 function showError(msg) {
+  setGenerating(false);
   document.getElementById('loading').style.display = 'none';
   document.getElementById('error-msg').style.display = 'block';
   document.getElementById('error-msg').textContent = msg;
@@ -184,4 +194,12 @@ function showError(msg) {
   setTimeout(() => {
     document.getElementById('error-msg').style.display = 'none';
   }, 8000);
+}
+
+function setGenerating(active) {
+  isGenerating = active;
+  ['btn-test-generate', 'btn-regenerate', 'btn-conservative', 'btn-fun'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = active;
+  });
 }

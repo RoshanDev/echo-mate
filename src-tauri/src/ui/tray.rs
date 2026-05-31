@@ -1,4 +1,7 @@
-use tauri::{AppHandle, Manager, tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}};
+use tauri::{
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager,
+};
 
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let _tray = TrayIconBuilder::new()

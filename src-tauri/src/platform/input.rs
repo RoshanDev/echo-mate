@@ -1,7 +1,11 @@
-// Input simulation — reserved for future use (auto Ctrl/Cmd+C)
-// MVP uses clipboard-first: user manually copies, we read clipboard.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use enigo::{
+    Direction::{Click, Press, Release},
+    Enigo, Key, Keyboard, Settings,
+};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use std::time::Duration;
 
-/// Placeholder for input simulation (requires macOS Accessibility permission)
 pub struct InputSimulator;
 
 impl InputSimulator {
@@ -11,9 +15,43 @@ impl InputSimulator {
 
     /// Simulate Ctrl/Cmd+C to copy current selection
     /// NOTE: Requires Accessibility permission on macOS.
-    /// NOT used in MVP — user manually copies before pressing hotkey.
-    #[allow(dead_code)]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub fn copy_selection(&self) -> Result<(), String> {
-        Err("Input simulation not enabled in MVP".into())
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| format!("Input simulation unavailable: {e}"))?;
+
+        let modifier = copy_modifier();
+        let _ = enigo.key(Key::Shift, Release);
+        let _ = enigo.key(modifier, Release);
+        std::thread::sleep(Duration::from_millis(25));
+
+        enigo
+            .key(modifier, Press)
+            .map_err(|e| format!("Failed to press copy modifier: {e}"))?;
+
+        let click_result = enigo
+            .key(Key::Unicode('c'), Click)
+            .map_err(|e| format!("Failed to press copy key: {e}"));
+        let release_result = enigo
+            .key(modifier, Release)
+            .map_err(|e| format!("Failed to release copy modifier: {e}"));
+
+        click_result?;
+        release_result
     }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub fn copy_selection(&self) -> Result<(), String> {
+        Err("Auto-copy selection is only supported on Windows and macOS".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_modifier() -> Key {
+    Key::Command
+}
+
+#[cfg(target_os = "windows")]
+fn copy_modifier() -> Key {
+    Key::Control
 }

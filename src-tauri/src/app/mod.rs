@@ -36,6 +36,7 @@ pub fn run() {
             ui::commands::regenerate_candidates,
             ui::commands::regenerate_with_style,
             ui::commands::record_copy,
+            ui::commands::copy_candidate,
             ui::commands::hide_window,
             ui::commands::open_settings,
             ui::commands::show_popup,
@@ -53,7 +54,8 @@ pub fn run() {
 
             // Initialize orchestrator via handle
             let handle = app.handle().clone();
-            let state = handle.try_state::<OrchestratorState>()
+            let state = handle
+                .try_state::<OrchestratorState>()
                 .expect("OrchestratorState not found");
             state.0.init(&handle);
 

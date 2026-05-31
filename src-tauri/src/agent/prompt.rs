@@ -21,7 +21,8 @@ impl PromptComposer {
 输出要求：
 - 严格符合传入 JSON Schema
 - 每条候选长度控制在 10~45 个汉字为主
-- 每条候选附带 style_tags、risk_flags、reason"#.to_string()
+- 每条候选附带 style_tags、risk_flags、reason"#
+            .to_string()
     }
 
     /// Build the task prompt with context

@@ -1,6 +1,6 @@
-pub mod message;
 pub mod candidate;
 pub mod memory_item;
+pub mod message;
 
-pub use message::{Message, Candidate, CandidateEnvelope, SendEvent};
 pub use memory_item::{ContactFact, StyleProfile};
+pub use message::{Candidate, CandidateEnvelope, Message, SendEvent};

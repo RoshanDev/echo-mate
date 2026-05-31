@@ -1,6 +1,11 @@
 /* EchoMate Light Theme */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+html {
+  width: 100%;
+  height: 100%;
+}
+
 :root {
   --bg-primary: #FBFAF8;
   --bg-secondary: #F5F3F0;
@@ -37,8 +42,9 @@ body {
   font-family: var(--font);
   background: var(--bg-primary);
   color: var(--text-primary);
-  width: 420px;
-  min-height: 320px;
+  width: 100%;
+  height: 100vh;
+  min-height: 0;
   overflow: hidden;
   user-select: none;
   -webkit-font-smoothing: antialiased;
@@ -48,9 +54,19 @@ body.settings-body {
   height: 100vh;
 }
 
+#popup {
+  width: 100vw;
+  height: 100vh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* ≡≡≡ Header ≡≡≡ */
 #header {
   display: flex;
+  flex: 0 0 auto;
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
@@ -87,6 +103,7 @@ body.settings-body {
 /* ≡≡≡ Status Bar ≡≡≡ */
 #status-bar {
   display: flex; align-items: center; gap: 10px;
+  flex: 0 0 auto;
   padding: 10px 16px; font-size: 12px; color: var(--text-secondary);
   background: var(--bg-primary); border-bottom: 1px solid var(--border-light);
 }
@@ -115,10 +132,20 @@ body.settings-body {
   white-space: nowrap;
 }
 #btn-test-generate:hover { background: var(--accent-hover); box-shadow: var(--shadow-sm); }
+#btn-test-generate:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+#btn-test-generate:disabled:hover {
+  background: var(--accent);
+  box-shadow: none;
+}
 
 /* ≡≡≡ Mode Indicator ≡≡≡ */
 #mode-indicator {
   display: flex; justify-content: space-between; align-items: center;
+  flex: 0 0 auto;
   padding: 8px 16px; font-size: 11px; color: var(--text-muted);
   background: var(--bg-secondary); border-bottom: 1px solid var(--border-light);
 }
@@ -126,8 +153,10 @@ body.settings-body {
 
 /* ≡≡≡ Candidates ≡≡≡ */
 #candidates-container {
-  padding: 12px 16px; min-height: 180px;
-  max-height: 420px; overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 16px 18px;
+  overflow-y: auto;
 }
 #candidates-list { display: flex; flex-direction: column; gap: 10px; }
 
@@ -211,6 +240,7 @@ body.settings-body {
 /* ≡≡≡ Actions Bar ≡≡≡ */
 #actions {
   display: flex; gap: 8px; padding: 12px 16px 16px;
+  flex: 0 0 auto;
   border-top: 1px solid var(--border-light); flex-wrap: wrap;
 }
 .action-btn {
@@ -232,6 +262,12 @@ body.settings-body {
   border-color: var(--text-muted);
 }
 .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.action-btn.primary:disabled:hover { background: var(--accent); box-shadow: none; }
+.action-btn.secondary:disabled:hover {
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
 
 /* ≡≡≡ Settings Page ≡≡≡ */
 #settings-page { width: 420px; }

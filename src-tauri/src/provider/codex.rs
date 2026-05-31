@@ -1,10 +1,10 @@
-use crate::domain::{CandidateEnvelope, Candidate};
+use crate::domain::{Candidate, CandidateEnvelope};
+use crate::provider::process::wait_with_timeout;
 use crate::provider::wsl;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::time::timeout;
 
 pub struct CodexProvider {
     binary: String,
@@ -35,7 +35,11 @@ impl CodexProvider {
         self
     }
 
-    pub async fn generate(&self, prompt: &str, schema_path: &PathBuf) -> anyhow::Result<CandidateEnvelope> {
+    pub async fn generate(
+        &self,
+        prompt: &str,
+        schema_path: &PathBuf,
+    ) -> anyhow::Result<CandidateEnvelope> {
         tokio::fs::create_dir_all(&self.workspace).await?;
 
         let output_file = self.workspace.join("final.json");
@@ -48,20 +52,28 @@ impl CodexProvider {
                 wsl::to_wsl_path(&output_file),
             )
         } else {
-            (self.workspace.clone(), schema_path.clone(), output_file.clone())
+            (
+                self.workspace.clone(),
+                schema_path.clone(),
+                output_file.clone(),
+            )
         };
 
         let mut cmd = wsl::wsl_command(&self.binary);
         cmd.arg("exec")
-            .arg("--sandbox").arg("read-only")
+            .arg("--sandbox")
+            .arg("read-only")
             .arg("--ephemeral")
             .arg("--ignore-user-config")
             .arg("--ignore-rules")
             .arg("--skip-git-repo-check")
-            .arg("--cd").arg(&cwd)
+            .arg("--cd")
+            .arg(&cwd)
             .arg("--json")
-            .arg("--output-schema").arg(&schema)
-            .arg("--output-last-message").arg(&out_file)
+            .arg("--output-schema")
+            .arg(&schema)
+            .arg("--output-last-message")
+            .arg(&out_file)
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -79,19 +91,16 @@ impl CodexProvider {
         }
         // On Windows, don't touch env — wsl.exe sets up the WSL environment automatically
 
-        let mut child = cmd.spawn()?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Codex could not start: {}", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
             stdin.shutdown().await?;
         }
 
-        let result = timeout(self.timeout, child.wait_with_output()).await;
-        let output = match result {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => anyhow::bail!("Codex process error: {}", e),
-            Err(_) => anyhow::bail!("Codex timed out after {:?}", self.timeout),
-        };
+        let output = wait_with_timeout(child, self.timeout, "Codex").await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -99,7 +108,11 @@ impl CodexProvider {
         }
 
         // Try output-last-message file (WSL path on Windows, native path on Linux)
-        let read_path = if wsl::is_windows() { &out_file } else { &output_file };
+        let read_path = if wsl::is_windows() {
+            &out_file
+        } else {
+            &output_file
+        };
         if read_path.exists() {
             let content = tokio::fs::read_to_string(read_path).await?;
             return parse_codex_output(&content);
