@@ -4,16 +4,8 @@ pub fn candidate_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["provider", "candidates"],
+        "required": ["candidates"],
         "properties": {
-            "provider": {
-                "type": "string",
-                "enum": ["codex", "claude"]
-            },
-            "conversation_summary": {
-                "type": "string",
-                "description": "Brief summary of the conversation context"
-            },
             "candidates": {
                 "type": "array",
                 "minItems": 5,
@@ -53,4 +45,28 @@ pub fn candidate_schema() -> serde_json::Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_schema_required_matches_top_level_properties() {
+        let schema = candidate_schema();
+        let properties = schema["properties"].as_object().expect("properties object");
+        let required = schema["required"].as_array().expect("required array");
+        let required = required
+            .iter()
+            .map(|value| value.as_str().expect("required string"))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(properties.len(), required.len());
+        for key in properties.keys() {
+            assert!(
+                required.contains(key.as_str()),
+                "missing required key {key}"
+            );
+        }
+    }
 }
