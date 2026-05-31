@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>EchoMate Frontend Memory Reminder Harness</title>
+  <link rel="stylesheet" href="../frontend/styles.css">
+</head>
+<body>
+  <div id="popup">
+    <div id="header">
+      <button id="btn-settings"></button>
+      <button id="btn-close"></button>
+    </div>
+    <div id="status-bar">
+      <span id="status-dot"></span>
+      <span id="status-text"></span>
+      <span id="provider-badge"></span>
+      <button id="btn-topic-generate"></button>
+      <button id="btn-screenshot-generate"></button>
+      <button id="btn-test-generate"></button>
+    </div>
+    <div id="mode-indicator" style="display:none">
+      <span id="mode-label"></span>
+      <span id="provider-label"></span>
+    </div>
+    <div id="insights-container" style="display:none">
+      <section class="insight-section" id="action-section">
+        <div class="section-title">当前适合做什么</div>
+        <div id="action-card" class="insight-card"></div>
+      </section>
+      <section class="insight-section" id="memory-section">
+        <div class="section-title">可能值得记住</div>
+        <div id="memory-cards" class="mini-card-list"></div>
+      </section>
+      <section class="insight-section" id="reminder-section">
+        <div class="section-title">提醒建议</div>
+        <div id="reminder-cards" class="mini-card-list"></div>
+      </section>
+    </div>
+    <div id="reminder-panel" style="display:none"></div>
+    <div id="candidates-container">
+      <div id="loading" style="display:none"></div>
+      <div id="error-msg" style="display:none"></div>
+      <div id="candidates-list"></div>
+    </div>
+    <div id="actions" style="display:none">
+      <button id="btn-conservative"></button>
+      <button id="btn-fun"></button>
+      <button id="btn-regenerate"></button>
+    </div>
+  </div>
+  <pre id="result">RUNNING</pre>
+
+  <script>
+    const callbacks = new Map();
+    const listeners = new Map();
+    let nextCallbackId = 1;
+    let nextEventId = 1;
+    const calls = [];
+
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener(_event, eventId) {
+        for (const handlers of listeners.values()) {
+          handlers.delete(eventId);
+        }
+      },
+    };
+
+    window.__TAURI_INTERNALS__ = {
+      transformCallback(callback) {
+        const id = nextCallbackId++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback(id) {
+        callbacks.delete(id);
+      },
+      invoke(command, args = {}) {
+        calls.push({ command, args });
+        if (command === 'plugin:event|listen') {
+          const eventId = nextEventId++;
+          const handlers = listeners.get(args.event) || new Map();
+          handlers.set(eventId, args.handler);
+          listeners.set(args.event, handlers);
+          return Promise.resolve(eventId);
+        }
+        if (command === 'plugin:event|unlisten') {
+          listeners.get(args.event)?.delete(args.eventId);
+          return Promise.resolve();
+        }
+        if (command === 'save_memory_candidate') {
+          return Promise.resolve({
+            id: 'mem-1',
+            ...args.candidate,
+            status: 'confirmed',
+            created_at: '2026-05-31T10:00:00Z',
+            updated_at: '2026-05-31T10:00:00Z',
+          });
+        }
+        if (command === 'create_reminder_from_candidate') {
+          return Promise.resolve({
+            reminder: {
+              id: 'rem-1',
+              memory_id: 'mem-2',
+              trigger_at: args.triggerAt,
+              reason: args.candidate.reason,
+              suggested_follow_up: args.candidate.suggested_follow_up,
+              status: 'scheduled',
+              snooze_count: 0,
+              created_at: '2026-05-31T10:00:00Z',
+              updated_at: '2026-05-31T10:00:00Z',
+            },
+            memory_item: {
+              id: 'mem-2',
+              memory_type: args.candidate.memory_type,
+              value: args.candidate.memory_value,
+              source_kind: args.candidate.source_kind,
+              source_ref: args.candidate.source_ref,
+              source_excerpt: args.candidate.source_excerpt,
+              confidence: args.candidate.confidence,
+              sensitivity: args.candidate.sensitivity,
+              expires_at: '',
+              status: 'confirmed',
+              created_at: '2026-05-31T10:00:00Z',
+              updated_at: '2026-05-31T10:00:00Z',
+            },
+            action_card: {
+              action_type: 'light_follow_up',
+              reason: '适合低压关心一次。',
+              confidence: 0.74,
+            },
+            follow_up_candidates: [
+              { text: '今天面试还顺利吗？', style_tags: ['低压跟进'], risk_flags: ['none'], reason: '直接' },
+              { text: '刚想起你之前说面试，怎么样啦？', style_tags: ['自然'], risk_flags: ['none'], reason: '自然' },
+              { text: '如果方便说的话，今天还顺利吗？', style_tags: ['尊重边界'], risk_flags: ['none'], reason: '低压' },
+            ],
+          });
+        }
+        if (
+          command === 'ignore_memory_candidate' ||
+          command === 'ignore_reminder_candidate' ||
+          command === 'delete_memory' ||
+          command === 'delete_reminder' ||
+          command === 'copy_candidate' ||
+          command === 'hide_window' ||
+          command === 'open_settings' ||
+          command === 'get_latest_notified_reminder'
+        ) {
+          return Promise.resolve(command === 'get_latest_notified_reminder' ? null : { ok: true });
+        }
+        return Promise.resolve();
+      },
+    };
+
+    window.__mockTauri = {
+      calls,
+      emit(event, payload) {
+        const handlers = listeners.get(event);
+        if (!handlers) return;
+        for (const callbackId of handlers.values()) {
+          callbacks.get(callbackId)?.({ event, id: callbackId, payload });
+        }
+      },
+    };
+  </script>
+  <script type="module" src="../frontend/main.js"></script>
+  <script type="module">
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const result = document.getElementById('result');
+
+    function assert(condition, message) {
+      if (!condition) {
+        throw new Error(message);
+      }
+    }
+
+    function clickButton(label) {
+      const button = [...document.querySelectorAll('button')]
+        .find((item) => item.textContent.trim() === label);
+      assert(button, `missing button: ${label}`);
+      button.click();
+    }
+
+    function payload() {
+      return {
+        provider: 'codex',
+        mode: 'standard',
+        candidates: [
+          { text: '那你明天面试加油，结束后好好休息。', style_tags: ['温柔'], risk_flags: ['none'], reason: '接住事件' },
+          { text: '明天面试顺利，别给自己太大压力。', style_tags: ['稳妥'], risk_flags: ['none'], reason: '低压鼓励' },
+          { text: '冲，明天就当去聊一聊。', style_tags: ['轻松'], risk_flags: ['none'], reason: '放松' },
+          { text: '早点睡，明天保持状态就好。', style_tags: ['关心'], risk_flags: ['none'], reason: '提醒休息' },
+          { text: '那我不打扰你准备啦，明天顺利。', style_tags: ['收束'], risk_flags: ['none'], reason: '自然收束' },
+        ],
+        action_card: {
+          action_type: 'wrap_up',
+          reason: '她明天有面试，适合轻鼓励后收束。',
+          confidence: 0.82,
+        },
+        memory_candidates: [{
+          memory_type: 'event',
+          value: '她明天有面试',
+          source_kind: 'text',
+          source_ref: 'clipboard',
+          source_excerpt: '我明天面试',
+          confidence: 0.9,
+          sensitivity: 'normal',
+          expires_at: '',
+        }],
+        reminder_candidates: [{
+          memory_type: 'event',
+          memory_value: '她明天有面试',
+          source_kind: 'text',
+          source_ref: 'clipboard',
+          source_excerpt: '我明天面试',
+          recommended_time: '明晚',
+          trigger_at: '2026-05-31T12:00:00Z',
+          reason: '面试后适合轻问结果。',
+          suggested_follow_up: '今天面试还顺利吗？',
+          confidence: 0.86,
+          sensitivity: 'normal',
+        }],
+        context_summary: {
+          source_kind: 'text',
+          source_ref: 'clipboard',
+          summary: '对方提到明天面试。',
+        },
+      };
+    }
+
+    try {
+      await sleep(100);
+      window.__mockTauri.emit('candidates-ready', payload());
+      await sleep(50);
+      assert(document.body.textContent.includes('当前适合做什么'), 'missing action section');
+      assert(document.body.textContent.includes('可能值得记住'), 'missing memory section');
+      assert(document.body.textContent.includes('提醒建议'), 'missing reminder section');
+      assert(document.body.textContent.includes('候选 1'), 'missing candidates');
+
+      clickButton('保存');
+      await sleep(50);
+      assert(document.body.textContent.includes('已保存'), 'memory was not saved in UI');
+
+      clickButton('提醒我');
+      await sleep(50);
+      assert(document.body.textContent.includes('删除提醒'), 'reminder was not created in UI');
+
+      window.__mockTauri.emit('reminder-due', {
+        reminder: {
+          id: 'rem-1',
+          memory_id: 'mem-2',
+          trigger_at: '2026-05-31T12:00:00Z',
+          reason: '面试后适合轻问结果。',
+          suggested_follow_up: '今天面试还顺利吗？',
+          status: 'notified',
+          snooze_count: 0,
+          created_at: '2026-05-31T10:00:00Z',
+          updated_at: '2026-05-31T12:00:00Z',
+        },
+        memory_item: {
+          id: 'mem-2',
+          memory_type: 'event',
+          value: '她明天有面试',
+          source_kind: 'text',
+          source_ref: 'clipboard',
+          source_excerpt: '我明天面试',
+          confidence: 0.86,
+          sensitivity: 'normal',
+          expires_at: '',
+          status: 'confirmed',
+          created_at: '2026-05-31T10:00:00Z',
+          updated_at: '2026-05-31T10:00:00Z',
+        },
+        action_card: {
+          action_type: 'light_follow_up',
+          reason: '这条提醒来自你确认保存的聊天事件。',
+          confidence: 0.74,
+        },
+        follow_up_candidates: [
+          { text: '今天面试还顺利吗？', style_tags: ['低压跟进'], risk_flags: ['none'], reason: '直接' },
+          { text: '刚想起你之前说面试，怎么样啦？', style_tags: ['自然'], risk_flags: ['none'], reason: '自然' },
+          { text: '如果方便说的话，今天还顺利吗？', style_tags: ['尊重边界'], risk_flags: ['none'], reason: '低压' },
+        ],
+      });
+      await sleep(50);
+      assert(document.body.textContent.includes('跟进提醒'), 'missing reminder panel');
+      assert(document.body.textContent.includes('今天面试还顺利吗？'), 'missing follow-up candidate');
+      document.querySelector('#reminder-panel .copy-btn').click();
+      await sleep(50);
+
+      const commands = window.__mockTauri.calls.map((call) => call.command);
+      assert(commands.includes('save_memory_candidate'), 'save command not invoked');
+      assert(commands.includes('create_reminder_from_candidate'), 'create reminder command not invoked');
+      assert(commands.includes('copy_candidate'), 'copy command not invoked');
+      result.textContent = 'PASS';
+    } catch (error) {
+      result.textContent = `FAIL: ${error.message}`;
+      console.error(error);
+    }
+  </script>
+</body>
+</html>

@@ -4,7 +4,7 @@ pub fn candidate_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["candidates"],
+        "required": ["candidates", "action_card", "memory_candidates", "reminder_candidates", "context_summary"],
         "properties": {
             "candidates": {
                 "type": "array",
@@ -42,6 +42,189 @@ pub fn candidate_schema() -> serde_json::Value {
                         }
                     }
                 }
+            },
+            "action_card": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action_type", "reason", "confidence"],
+                "properties": {
+                    "action_type": {
+                        "type": "string",
+                        "enum": [
+                            "continue_chat",
+                            "wrap_up",
+                            "light_follow_up",
+                            "do_not_push",
+                            "safe_repair",
+                            "soft_invite_candidate"
+                        ]
+                    },
+                    "reason": {
+                        "type": "string",
+                        "maxLength": 180
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                    }
+                }
+            },
+            "memory_candidates": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "memory_type",
+                        "value",
+                        "source_kind",
+                        "source_ref",
+                        "source_excerpt",
+                        "confidence",
+                        "sensitivity",
+                        "expires_at"
+                    ],
+                    "properties": {
+                        "memory_type": {
+                            "type": "string",
+                            "enum": [
+                                "event",
+                                "preference",
+                                "boundary",
+                                "stress_point",
+                                "relationship_milestone"
+                            ]
+                        },
+                        "value": {
+                            "type": "string",
+                            "minLength": 2,
+                            "maxLength": 180
+                        },
+                        "source_kind": {
+                            "type": "string",
+                            "enum": ["text", "screenshot"]
+                        },
+                        "source_ref": {
+                            "type": "string",
+                            "maxLength": 120
+                        },
+                        "source_excerpt": {
+                            "type": "string",
+                            "maxLength": 180
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                        },
+                        "sensitivity": {
+                            "type": "string",
+                            "enum": ["normal", "medium", "high", "forbidden"]
+                        },
+                        "expires_at": {
+                            "type": "string",
+                            "maxLength": 40,
+                            "description": "RFC3339 time when this memory should expire, or empty string if long-lived"
+                        }
+                    }
+                }
+            },
+            "reminder_candidates": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "memory_type",
+                        "memory_value",
+                        "source_kind",
+                        "source_ref",
+                        "source_excerpt",
+                        "recommended_time",
+                        "trigger_at",
+                        "reason",
+                        "suggested_follow_up",
+                        "confidence",
+                        "sensitivity"
+                    ],
+                    "properties": {
+                        "memory_type": {
+                            "type": "string",
+                            "enum": [
+                                "event",
+                                "preference",
+                                "boundary",
+                                "stress_point",
+                                "relationship_milestone"
+                            ]
+                        },
+                        "memory_value": {
+                            "type": "string",
+                            "minLength": 2,
+                            "maxLength": 180
+                        },
+                        "source_kind": {
+                            "type": "string",
+                            "enum": ["text", "screenshot"]
+                        },
+                        "source_ref": {
+                            "type": "string",
+                            "maxLength": 120
+                        },
+                        "source_excerpt": {
+                            "type": "string",
+                            "maxLength": 180
+                        },
+                        "recommended_time": {
+                            "type": "string",
+                            "maxLength": 80
+                        },
+                        "trigger_at": {
+                            "type": "string",
+                            "maxLength": 40,
+                            "description": "RFC3339 local or UTC timestamp for the reminder"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "maxLength": 180
+                        },
+                        "suggested_follow_up": {
+                            "type": "string",
+                            "maxLength": 120
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                        },
+                        "sensitivity": {
+                            "type": "string",
+                            "enum": ["normal", "medium", "high", "forbidden"]
+                        }
+                    }
+                }
+            },
+            "context_summary": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source_kind", "source_ref", "summary"],
+                "properties": {
+                    "source_kind": {
+                        "type": "string",
+                        "enum": ["text", "screenshot"]
+                    },
+                    "source_ref": {
+                        "type": "string",
+                        "maxLength": 120
+                    },
+                    "summary": {
+                        "type": "string",
+                        "maxLength": 220
+                    }
+                }
             }
         }
     })
@@ -68,5 +251,38 @@ mod tests {
                 "missing required key {key}"
             );
         }
+    }
+
+    #[test]
+    fn candidate_schema_nested_objects_are_strict() {
+        fn assert_required_matches_properties(value: &serde_json::Value) {
+            if value["type"] == "object" {
+                let properties = value["properties"].as_object().expect("properties object");
+                let required = value["required"].as_array().expect("required array");
+                let required = required
+                    .iter()
+                    .map(|value| value.as_str().expect("required string"))
+                    .collect::<std::collections::BTreeSet<_>>();
+
+                assert_eq!(properties.len(), required.len());
+                for key in properties.keys() {
+                    assert!(
+                        required.contains(key.as_str()),
+                        "missing required key {key}"
+                    );
+                }
+            }
+
+            if let Some(properties) = value["properties"].as_object() {
+                for child in properties.values() {
+                    assert_required_matches_properties(child);
+                }
+            }
+            if let Some(items) = value.get("items") {
+                assert_required_matches_properties(items);
+            }
+        }
+
+        assert_required_matches_properties(&candidate_schema());
     }
 }

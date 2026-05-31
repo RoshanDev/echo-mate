@@ -1,5 +1,162 @@
 use serde::{Deserialize, Serialize};
 
+fn default_confidence() -> f64 {
+    0.0
+}
+
+fn default_action_type() -> String {
+    "continue_chat".to_string()
+}
+
+fn default_source_kind() -> String {
+    "text".to_string()
+}
+
+fn default_sensitivity() -> String {
+    "normal".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NextAction {
+    #[serde(default = "default_action_type")]
+    pub action_type: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+}
+
+impl Default for NextAction {
+    fn default() -> Self {
+        Self {
+            action_type: default_action_type(),
+            reason: String::new(),
+            confidence: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCandidate {
+    #[serde(default)]
+    pub memory_type: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default = "default_source_kind")]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_ref: String,
+    #[serde(default)]
+    pub source_excerpt: String,
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+    #[serde(default = "default_sensitivity")]
+    pub sensitivity: String,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderCandidate {
+    #[serde(default)]
+    pub memory_type: String,
+    #[serde(default)]
+    pub memory_value: String,
+    #[serde(default = "default_source_kind")]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_ref: String,
+    #[serde(default)]
+    pub source_excerpt: String,
+    #[serde(default)]
+    pub recommended_time: String,
+    #[serde(default)]
+    pub trigger_at: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub suggested_follow_up: String,
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+    #[serde(default = "default_sensitivity")]
+    pub sensitivity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextSummaryCandidate {
+    #[serde(default = "default_source_kind")]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_ref: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+impl Default for ContextSummaryCandidate {
+    fn default() -> Self {
+        Self {
+            source_kind: default_source_kind(),
+            source_ref: String::new(),
+            summary: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryItemRecord {
+    pub id: String,
+    pub memory_type: String,
+    pub value: String,
+    pub source_kind: String,
+    pub source_ref: String,
+    pub source_excerpt: String,
+    pub confidence: f64,
+    pub sensitivity: String,
+    pub expires_at: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderRecord {
+    pub id: String,
+    pub memory_id: String,
+    pub trigger_at: String,
+    pub reason: String,
+    pub suggested_follow_up: String,
+    pub status: String,
+    pub snooze_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextSummaryRecord {
+    pub id: String,
+    pub source_kind: String,
+    pub source_ref: String,
+    pub summary: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyFeedbackRecord {
+    pub id: String,
+    pub generation_id: String,
+    pub action: String,
+    pub candidate_index: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderDetail {
+    pub reminder: ReminderRecord,
+    pub memory_item: MemoryItemRecord,
+    pub action_card: NextAction,
+    pub follow_up_candidates: Vec<super::message::Candidate>,
+}
+
 /// A learned fact about the conversation contact
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContactFact {

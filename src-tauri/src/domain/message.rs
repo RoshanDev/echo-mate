@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::memory_item::{ContextSummaryCandidate, MemoryCandidate, NextAction, ReminderCandidate};
+
 /// A raw chat message captured from clipboard
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -26,6 +28,26 @@ pub struct Candidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateEnvelope {
     pub candidates: Vec<Candidate>,
+    #[serde(default)]
+    pub action_card: NextAction,
+    #[serde(default)]
+    pub memory_candidates: Vec<MemoryCandidate>,
+    #[serde(default)]
+    pub reminder_candidates: Vec<ReminderCandidate>,
+    #[serde(default)]
+    pub context_summary: ContextSummaryCandidate,
+}
+
+impl CandidateEnvelope {
+    pub fn from_candidates(candidates: Vec<Candidate>) -> Self {
+        Self {
+            candidates,
+            action_card: NextAction::default(),
+            memory_candidates: Vec::new(),
+            reminder_candidates: Vec::new(),
+            context_summary: ContextSummaryCandidate::default(),
+        }
+    }
 }
 
 /// An event recording which candidate the user sent

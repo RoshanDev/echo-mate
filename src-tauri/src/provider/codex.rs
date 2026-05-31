@@ -151,7 +151,7 @@ fn parse_codex_output(raw: &str) -> anyhow::Result<CandidateEnvelope> {
     if let Ok(wrapped) = serde_json::from_str::<serde_json::Value>(raw) {
         if let Some(candidates) = wrapped.get("candidates") {
             if let Ok(list) = serde_json::from_value::<Vec<Candidate>>(candidates.clone()) {
-                return Ok(CandidateEnvelope { candidates: list });
+                return Ok(CandidateEnvelope::from_candidates(list));
             }
         }
     }

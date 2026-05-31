@@ -1,8 +1,9 @@
-use tauri::AppHandle;
+use tauri::{image::Image, AppHandle};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 pub struct ClipboardManager;
 
+#[derive(Clone)]
 pub struct ClipboardImage {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -28,6 +29,17 @@ impl ClipboardManager {
         app.clipboard()
             .write_text(text.to_string())
             .map_err(|e| format!("Clipboard write error: {}", e))
+    }
+
+    /// Write an RGBA image to clipboard.
+    pub fn write_image(&self, app: &AppHandle, image: &ClipboardImage) -> Result<(), String> {
+        app.clipboard()
+            .write_image(&Image::new_owned(
+                image.rgba.clone(),
+                image.width,
+                image.height,
+            ))
+            .map_err(|e| format!("Clipboard image write error: {}", e))
     }
 
     /// Read current clipboard image as RGBA pixels.

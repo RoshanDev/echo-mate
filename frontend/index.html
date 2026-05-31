@@ -31,9 +31,10 @@
 
     <div id="status-bar">
       <span id="status-dot"></span>
-      <span id="status-text">就绪，点击"生成回复"或按热键触发</span>
+      <span id="status-text">就绪，自动识别剪贴板文字或截图</span>
       <span id="provider-badge"></span>
-      <button id="btn-screenshot-generate">▣ 截图上下文</button>
+      <button id="btn-topic-generate">💬 找话题</button>
+      <button id="btn-screenshot-generate">▣ 框选截图</button>
       <button id="btn-test-generate">⚡ 生成回复</button>
     </div>
 
@@ -41,6 +42,25 @@
       <span id="mode-label"></span>
       <span id="provider-label"></span>
     </div>
+
+    <div id="insights-container" style="display:none">
+      <section class="insight-section" id="action-section">
+        <div class="section-title">当前适合做什么</div>
+        <div id="action-card" class="insight-card"></div>
+      </section>
+
+      <section class="insight-section" id="memory-section">
+        <div class="section-title">可能值得记住</div>
+        <div id="memory-cards" class="mini-card-list"></div>
+      </section>
+
+      <section class="insight-section" id="reminder-section">
+        <div class="section-title">提醒建议</div>
+        <div id="reminder-cards" class="mini-card-list"></div>
+      </section>
+    </div>
+
+    <div id="reminder-panel" style="display:none"></div>
 
     <div id="candidates-container">
       <div id="loading" style="display:none">
@@ -53,7 +73,7 @@
 
     <div id="actions" style="display:none">
       <button id="btn-conservative" class="action-btn secondary">🛡 再保守一点</button>
-      <button id="btn-fun" class="action-btn secondary">😄 再有趣一点</button>
+      <button id="btn-fun" class="action-btn secondary">😄 再轻松一点</button>
       <button id="btn-regenerate" class="action-btn primary">🔄 重新生成</button>
     </div>
   </div>

@@ -30,10 +30,12 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(OrchestratorState(orchestrator))
         .invoke_handler(tauri::generate_handler![
             ui::commands::generate_replies,
             ui::commands::generate_replies_from_screenshot,
+            ui::commands::generate_topics,
             ui::commands::regenerate_candidates,
             ui::commands::regenerate_with_style,
             ui::commands::record_copy,
@@ -45,6 +47,13 @@ pub fn run() {
             ui::commands::save_settings,
             ui::commands::reset_settings,
             ui::commands::record_hotkey,
+            ui::commands::save_memory_candidate,
+            ui::commands::create_reminder_from_candidate,
+            ui::commands::ignore_memory_candidate,
+            ui::commands::ignore_reminder_candidate,
+            ui::commands::delete_memory,
+            ui::commands::delete_reminder,
+            ui::commands::get_latest_notified_reminder,
         ])
         .setup(|app| {
             tracing::info!("EchoMate starting up");
