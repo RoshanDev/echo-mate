@@ -1,12 +1,13 @@
 // Memory repository for style profiles, contact facts, and reminder MVP data.
 use crate::domain::{
-    Candidate, ContextSummaryCandidate, ContextSummaryRecord, MemoryCandidate, MemoryItemRecord,
-    NextAction, ReminderCandidate, ReminderDetail, ReminderRecord, ReplyFeedbackRecord,
+    Candidate, ContactInput, ContactRecord, ContextSummaryCandidate, ContextSummaryRecord,
+    MemoryCandidate, MemoryItemRecord, MessageRecord, NextAction, ReminderCandidate,
+    ReminderDetail, ReminderRecord, ReplyFeedbackRecord, StyleProfileRecord,
 };
 use crate::store::migrations::run_migrations;
 use anyhow::{anyhow, bail};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,8 +40,358 @@ impl MemoryRepository {
         Ok(conn)
     }
 
+    pub fn list_contacts(&self) -> anyhow::Result<Vec<ContactRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, alias, channel, is_allowlisted, created_at, updated_at
+             FROM contacts
+             ORDER BY updated_at DESC, alias ASC",
+        )?;
+        let rows = stmt.query_map([], contact_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn upsert_contact(&self, input: &ContactInput) -> anyhow::Result<ContactRecord> {
+        let alias = input.alias.trim();
+        if alias.is_empty() {
+            bail!("联系人别名不能为空");
+        }
+        let channel = non_empty(&input.channel, "wechat");
+        let now = now_rfc3339();
+        let conn = self.connection()?;
+        let existing = input
+            .id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .and_then(|id| self.get_contact(id).ok().flatten());
+        let existing_by_key = if existing.is_none() {
+            self.find_contact_by_alias_channel(alias, &channel)?
+        } else {
+            None
+        };
+        let id = existing
+            .or(existing_by_key)
+            .map(|contact| contact.id)
+            .unwrap_or_else(|| next_id("contact"));
+
+        conn.execute(
+            "INSERT INTO contacts (id, alias, channel, is_allowlisted, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                alias = excluded.alias,
+                channel = excluded.channel,
+                is_allowlisted = excluded.is_allowlisted,
+                updated_at = excluded.updated_at",
+            params![
+                &id,
+                alias,
+                &channel,
+                bool_to_i64(input.is_allowlisted),
+                &now,
+                &now
+            ],
+        )?;
+        self.get_contact(&id)?
+            .ok_or_else(|| anyhow!("联系人保存后未能读取"))
+    }
+
+    pub fn get_contact(&self, id: &str) -> anyhow::Result<Option<ContactRecord>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT id, alias, channel, is_allowlisted, created_at, updated_at
+             FROM contacts WHERE id = ?1",
+            params![id],
+            contact_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn find_allowlisted_contact(
+        &self,
+        alias: &str,
+        channel: &str,
+    ) -> anyhow::Result<Option<ContactRecord>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT id, alias, channel, is_allowlisted, created_at, updated_at
+             FROM contacts
+             WHERE lower(alias) = lower(?1)
+               AND lower(channel) = lower(?2)
+               AND is_allowlisted = 1
+             LIMIT 1",
+            params![alias.trim(), non_empty(channel, "wechat")],
+            contact_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn find_contact_by_alias_channel(
+        &self,
+        alias: &str,
+        channel: &str,
+    ) -> anyhow::Result<Option<ContactRecord>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT id, alias, channel, is_allowlisted, created_at, updated_at
+             FROM contacts
+             WHERE lower(alias) = lower(?1)
+               AND lower(channel) = lower(?2)
+             LIMIT 1",
+            params![alias.trim(), non_empty(channel, "wechat")],
+            contact_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn delete_contact(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM messages WHERE contact_id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM platform_signal_log WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM context_summary WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "UPDATE memory_item SET status = 'deleted', updated_at = ?2 WHERE contact_id = ?1",
+            params![id, now_rfc3339()],
+        )?;
+        conn.execute(
+            "UPDATE reminder
+             SET status = 'cancelled', updated_at = ?2
+             WHERE memory_id IN (SELECT id FROM memory_item WHERE contact_id = ?1)",
+            params![id, now_rfc3339()],
+        )?;
+        conn.execute("DELETE FROM contacts WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn clear_contact_context(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM messages WHERE contact_id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM platform_signal_log WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM context_summary WHERE contact_id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_message(
+        &self,
+        contact_id: &str,
+        role: &str,
+        text: &str,
+        source: &str,
+        approved: bool,
+    ) -> anyhow::Result<MessageRecord> {
+        if contact_id.trim().is_empty() {
+            bail!("contact_id is required to save a message");
+        }
+        if text.trim().is_empty() {
+            bail!("message text is empty");
+        }
+        let record = MessageRecord {
+            id: next_id("msg"),
+            contact_id: contact_id.to_string(),
+            role: non_empty(role, "other"),
+            text: text.trim().chars().take(800).collect(),
+            source: non_empty(source, "manual"),
+            approved,
+            created_at: now_rfc3339(),
+        };
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO messages (id, contact_id, role, text, source, approved, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &record.id,
+                &record.contact_id,
+                &record.role,
+                &record.text,
+                &record.source,
+                bool_to_i64(record.approved),
+                &record.created_at
+            ],
+        )?;
+        Ok(record)
+    }
+
+    pub fn record_platform_signal_log(
+        &self,
+        contact_id: &str,
+        contact_alias: &str,
+        channel: &str,
+        source: &str,
+        app_name: &str,
+        text: &str,
+        allowed: bool,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        if contact_id.trim().is_empty() {
+            bail!("contact_id is required to save a platform signal log");
+        }
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO platform_signal_log
+                (id, contact_id, contact_alias, channel, source, app_name, text_excerpt, allowed, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                next_id("sig"),
+                contact_id,
+                contact_alias.trim(),
+                non_empty(channel, "wechat"),
+                non_empty(source, "notification"),
+                app_name.trim(),
+                truncate_chars(text.trim(), 200),
+                bool_to_i64(allowed),
+                reason,
+                now_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn platform_signal_log_count(&self, contact_id: &str) -> anyhow::Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM platform_signal_log WHERE contact_id = ?1",
+            params![contact_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn recent_messages(
+        &self,
+        contact_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MessageRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, contact_id, role, text, source, approved, created_at
+             FROM messages
+             WHERE contact_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![contact_id, limit as i64], message_from_row)?;
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    pub fn confirmed_memories_for_contact(
+        &self,
+        contact_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryItemRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, contact_id, type, value, source_kind, source_ref, source_excerpt,
+                confidence, sensitivity, expires_at, status, created_at, updated_at
+             FROM memory_item
+             WHERE contact_id = ?1 AND status = 'confirmed'
+             ORDER BY updated_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![contact_id, limit as i64], memory_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn update_style_profile_from_reply(
+        &self,
+        adopted_text: &str,
+    ) -> anyhow::Result<StyleProfileRecord> {
+        let text = adopted_text.trim();
+        if text.is_empty() {
+            bail!("adopted reply is empty");
+        }
+        let conn = self.connection()?;
+        let existing = self.style_profile()?;
+        let sample_count = existing
+            .as_ref()
+            .map(|profile| profile.sample_count + 1)
+            .unwrap_or(1);
+        let profile_json = build_style_profile_json(text, existing.as_ref(), sample_count)?;
+        let updated_at = now_rfc3339();
+        conn.execute(
+            "INSERT INTO style_profile (id, profile_json, sample_count, updated_at)
+             VALUES ('default', ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+                profile_json = excluded.profile_json,
+                sample_count = excluded.sample_count,
+                updated_at = excluded.updated_at",
+            params![&profile_json, sample_count, &updated_at],
+        )?;
+        Ok(StyleProfileRecord {
+            id: "default".to_string(),
+            profile_json,
+            sample_count,
+            updated_at,
+        })
+    }
+
+    pub fn style_profile(&self) -> anyhow::Result<Option<StyleProfileRecord>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT id, profile_json, sample_count, updated_at
+             FROM style_profile
+             WHERE id = 'default'",
+            [],
+            |row| {
+                Ok(StyleProfileRecord {
+                    id: row.get(0)?,
+                    profile_json: row.get(1)?,
+                    sample_count: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn apply_retention(&self, retention_days: i64) -> anyhow::Result<()> {
+        if retention_days <= 0 {
+            return Ok(());
+        }
+        let cutoff = Utc::now() - Duration::days(retention_days);
+        let cutoff = to_rfc3339(cutoff);
+        let conn = self.connection()?;
+        conn.execute(
+            "DELETE FROM messages WHERE approved = 0 AND created_at < ?1",
+            params![&cutoff],
+        )?;
+        conn.execute(
+            "DELETE FROM context_summary WHERE created_at < ?1",
+            params![&cutoff],
+        )?;
+        conn.execute(
+            "DELETE FROM platform_signal_log WHERE created_at < ?1",
+            params![&cutoff],
+        )?;
+        Ok(())
+    }
+
     pub fn insert_context_summary(
         &self,
+        summary: &ContextSummaryCandidate,
+    ) -> anyhow::Result<ContextSummaryRecord> {
+        self.insert_context_summary_for_contact(None, summary)
+    }
+
+    pub fn insert_context_summary_for_contact(
+        &self,
+        contact_id: Option<&str>,
         summary: &ContextSummaryCandidate,
     ) -> anyhow::Result<ContextSummaryRecord> {
         if summary.summary.trim().is_empty() {
@@ -49,7 +400,8 @@ impl MemoryRepository {
 
         let record = ContextSummaryRecord {
             id: next_id("ctx"),
-            source_kind: non_empty(&summary.source_kind, "text"),
+            contact_id: contact_id.unwrap_or_default().to_string(),
+            source_kind: non_empty(&summary.source_kind, "clipboard"),
             source_ref: summary.source_ref.clone(),
             summary: summary.summary.clone(),
             created_at: now_rfc3339(),
@@ -57,10 +409,11 @@ impl MemoryRepository {
 
         let conn = self.connection()?;
         conn.execute(
-            "INSERT INTO context_summary (id, source_kind, source_ref, summary, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO context_summary (id, contact_id, source_kind, source_ref, summary, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 &record.id,
+                &record.contact_id,
                 &record.source_kind,
                 &record.source_ref,
                 &record.summary,
@@ -70,8 +423,22 @@ impl MemoryRepository {
         Ok(record)
     }
 
+    pub fn delete_context_summary(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM context_summary WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn save_memory_candidate(
         &self,
+        candidate: &MemoryCandidate,
+    ) -> anyhow::Result<MemoryItemRecord> {
+        self.save_memory_candidate_for_contact(None, candidate)
+    }
+
+    pub fn save_memory_candidate_for_contact(
+        &self,
+        contact_id: Option<&str>,
         candidate: &MemoryCandidate,
     ) -> anyhow::Result<MemoryItemRecord> {
         ensure_allowed_sensitivity(&candidate.sensitivity)?;
@@ -80,9 +447,10 @@ impl MemoryRepository {
         }
         let record = MemoryItemRecord {
             id: next_id("mem"),
+            contact_id: contact_id.unwrap_or_default().to_string(),
             memory_type: non_empty(&candidate.memory_type, "event"),
             value: candidate.value.trim().to_string(),
-            source_kind: non_empty(&candidate.source_kind, "text"),
+            source_kind: non_empty(&candidate.source_kind, "clipboard"),
             source_ref: candidate.source_ref.clone(),
             source_excerpt: candidate.source_excerpt.clone(),
             confidence: candidate.confidence.clamp(0.0, 1.0),
@@ -102,6 +470,15 @@ impl MemoryRepository {
         candidate: &ReminderCandidate,
         trigger_at_override: Option<String>,
     ) -> anyhow::Result<ReminderDetail> {
+        self.create_reminder_from_candidate_for_contact(None, candidate, trigger_at_override)
+    }
+
+    pub fn create_reminder_from_candidate_for_contact(
+        &self,
+        contact_id: Option<&str>,
+        candidate: &ReminderCandidate,
+        trigger_at_override: Option<String>,
+    ) -> anyhow::Result<ReminderDetail> {
         ensure_allowed_sensitivity(&candidate.sensitivity)?;
         if candidate.memory_value.trim().is_empty() {
             bail!("reminder memory value is empty");
@@ -109,9 +486,10 @@ impl MemoryRepository {
 
         let memory = MemoryItemRecord {
             id: next_id("mem"),
+            contact_id: contact_id.unwrap_or_default().to_string(),
             memory_type: non_empty(&candidate.memory_type, "event"),
             value: candidate.memory_value.trim().to_string(),
-            source_kind: non_empty(&candidate.source_kind, "text"),
+            source_kind: non_empty(&candidate.source_kind, "clipboard"),
             source_ref: candidate.source_ref.clone(),
             source_excerpt: candidate.source_excerpt.clone(),
             confidence: candidate.confidence.clamp(0.0, 1.0),
@@ -168,7 +546,7 @@ impl MemoryRepository {
             "SELECT
                 r.id, r.memory_id, r.trigger_at, r.reason, r.suggested_follow_up,
                 r.status, r.snooze_count, r.created_at, r.updated_at,
-                m.id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
+                m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
                 m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
              FROM reminder r
              JOIN memory_item m ON m.id = r.memory_id
@@ -188,20 +566,7 @@ impl MemoryRepository {
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
             };
-            let memory = MemoryItemRecord {
-                id: row.get(9)?,
-                memory_type: row.get(10)?,
-                value: row.get(11)?,
-                source_kind: row.get(12)?,
-                source_ref: row.get(13)?,
-                source_excerpt: row.get(14)?,
-                confidence: row.get(15)?,
-                sensitivity: row.get(16)?,
-                expires_at: row.get(17)?,
-                status: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
-            };
+            let memory = memory_from_joined_row(row, 9)?;
             Ok(build_reminder_detail(reminder, memory))
         })?;
 
@@ -214,7 +579,7 @@ impl MemoryRepository {
             "SELECT
                 r.id, r.memory_id, r.trigger_at, r.reason, r.suggested_follow_up,
                 r.status, r.snooze_count, r.created_at, r.updated_at,
-                m.id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
+                m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
                 m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
              FROM reminder r
              JOIN memory_item m ON m.id = r.memory_id
@@ -234,20 +599,7 @@ impl MemoryRepository {
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
             };
-            let memory = MemoryItemRecord {
-                id: row.get(9)?,
-                memory_type: row.get(10)?,
-                value: row.get(11)?,
-                source_kind: row.get(12)?,
-                source_ref: row.get(13)?,
-                source_excerpt: row.get(14)?,
-                confidence: row.get(15)?,
-                sensitivity: row.get(16)?,
-                expires_at: row.get(17)?,
-                status: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
-            };
+            let memory = memory_from_joined_row(row, 9)?;
             Ok(build_reminder_detail(reminder, memory))
         })
         .optional()
@@ -302,6 +654,17 @@ impl MemoryRepository {
         action: &str,
         candidate_index: i64,
     ) -> anyhow::Result<ReplyFeedbackRecord> {
+        self.record_reply_feedback_for_contact(generation_id, action, candidate_index, "", None)
+    }
+
+    pub fn record_reply_feedback_for_contact(
+        &self,
+        generation_id: &str,
+        action: &str,
+        candidate_index: i64,
+        candidate_text: &str,
+        contact_id: Option<&str>,
+    ) -> anyhow::Result<ReplyFeedbackRecord> {
         let record = ReplyFeedbackRecord {
             id: next_id("fb"),
             generation_id: generation_id.to_string(),
@@ -311,13 +674,16 @@ impl MemoryRepository {
         };
         let conn = self.connection()?;
         conn.execute(
-            "INSERT INTO reply_feedback (id, generation_id, action, candidate_index, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO reply_feedback
+                (id, generation_id, action, candidate_index, candidate_text, contact_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 &record.id,
                 &record.generation_id,
                 &record.action,
                 record.candidate_index,
+                candidate_text.chars().take(500).collect::<String>(),
+                contact_id.unwrap_or_default(),
                 &record.created_at
             ],
         )?;
@@ -339,10 +705,11 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute(
             "INSERT INTO memory_item
-                (id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                (id, contact_id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 &record.id,
+                &record.contact_id,
                 &record.memory_type,
                 &record.value,
                 &record.source_kind,
@@ -440,6 +807,10 @@ fn non_empty(value: &str, fallback: &str) -> String {
     }
 }
 
+fn truncate_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
 fn now_rfc3339() -> String {
     to_rfc3339(Utc::now())
 }
@@ -466,6 +837,101 @@ fn short_value(value: &str) -> String {
     }
 }
 
+fn contact_from_row(row: &Row<'_>) -> rusqlite::Result<ContactRecord> {
+    let allowlisted: i64 = row.get(3)?;
+    Ok(ContactRecord {
+        id: row.get(0)?,
+        alias: row.get(1)?,
+        channel: row.get(2)?,
+        is_allowlisted: allowlisted != 0,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn message_from_row(row: &Row<'_>) -> rusqlite::Result<MessageRecord> {
+    let approved: i64 = row.get(5)?;
+    Ok(MessageRecord {
+        id: row.get(0)?,
+        contact_id: row.get(1)?,
+        role: row.get(2)?,
+        text: row.get(3)?,
+        source: row.get(4)?,
+        approved: approved != 0,
+        created_at: row.get(6)?,
+    })
+}
+
+fn memory_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryItemRecord> {
+    memory_from_joined_row(row, 0)
+}
+
+fn memory_from_joined_row(row: &Row<'_>, start: usize) -> rusqlite::Result<MemoryItemRecord> {
+    Ok(MemoryItemRecord {
+        id: row.get(start)?,
+        contact_id: row.get(start + 1)?,
+        memory_type: row.get(start + 2)?,
+        value: row.get(start + 3)?,
+        source_kind: row.get(start + 4)?,
+        source_ref: row.get(start + 5)?,
+        source_excerpt: row.get(start + 6)?,
+        confidence: row.get(start + 7)?,
+        sensitivity: row.get(start + 8)?,
+        expires_at: row.get(start + 9)?,
+        status: row.get(start + 10)?,
+        created_at: row.get(start + 11)?,
+        updated_at: row.get(start + 12)?,
+    })
+}
+
+fn bool_to_i64(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+fn build_style_profile_json(
+    adopted_text: &str,
+    existing: Option<&StyleProfileRecord>,
+    sample_count: i64,
+) -> anyhow::Result<String> {
+    let old_average = existing
+        .and_then(|profile| serde_json::from_str::<serde_json::Value>(&profile.profile_json).ok())
+        .and_then(|json| json.get("avg_chars").and_then(|value| value.as_f64()))
+        .unwrap_or(0.0);
+    let chars = adopted_text.chars().count() as f64;
+    let avg_chars = if sample_count <= 1 {
+        chars
+    } else {
+        ((old_average * ((sample_count - 1) as f64)) + chars) / sample_count as f64
+    };
+    let tone = if adopted_text.contains('？') || adopted_text.contains('?') {
+        "接话提问"
+    } else if adopted_text.chars().count() <= 22 {
+        "简短低压"
+    } else {
+        "温和解释"
+    };
+    let emoji_level = adopted_text
+        .chars()
+        .filter(|ch| !ch.is_ascii() && !('\u{4e00}'..='\u{9fff}').contains(ch))
+        .count();
+    let summary = format!(
+        "已采用 {sample_count} 条回复，平均约 {:.0} 字，最近偏向{}；只保存统计摘要，不保存无限原文样本。",
+        avg_chars, tone
+    );
+    serde_json::to_string(&serde_json::json!({
+        "summary": summary,
+        "avg_chars": avg_chars,
+        "tone_labels": [tone],
+        "emoji_marks_recent": emoji_level,
+        "updated_from": "adopted_reply_summary"
+    }))
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,7 +945,7 @@ mod tests {
             .save_memory_candidate(&MemoryCandidate {
                 memory_type: "event".to_string(),
                 value: "她明天面试".to_string(),
-                source_kind: "text".to_string(),
+                source_kind: "clipboard".to_string(),
                 source_ref: "clipboard".to_string(),
                 source_excerpt: "我明天面试".to_string(),
                 confidence: 0.88,
@@ -494,7 +960,7 @@ mod tests {
                 &ReminderCandidate {
                     memory_type: "event".to_string(),
                     memory_value: "她明天面试".to_string(),
-                    source_kind: "text".to_string(),
+                    source_kind: "clipboard".to_string(),
                     source_ref: "clipboard".to_string(),
                     source_excerpt: "我明天面试".to_string(),
                     recommended_time: "今晚".to_string(),
@@ -530,7 +996,7 @@ mod tests {
             .save_memory_candidate(&MemoryCandidate {
                 memory_type: "event".to_string(),
                 value: "不该保存".to_string(),
-                source_kind: "text".to_string(),
+                source_kind: "clipboard".to_string(),
                 source_ref: String::new(),
                 source_excerpt: "secret".to_string(),
                 confidence: 0.7,
@@ -539,6 +1005,110 @@ mod tests {
             })
             .expect_err("forbidden should fail");
         assert!(err.to_string().contains("禁止保存"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn contacts_messages_retention_and_style_profile_work() {
+        let path = std::env::temp_dir().join(format!("echomate-test-{}.db", next_id("repo")));
+        let repo = MemoryRepository::new(path.clone()).expect("repo");
+
+        let contact = repo
+            .upsert_contact(&ContactInput {
+                id: None,
+                alias: "齐齐".to_string(),
+                channel: "wechat".to_string(),
+                is_allowlisted: true,
+            })
+            .expect("upsert contact");
+        assert!(contact.is_allowlisted);
+        assert!(repo
+            .find_allowlisted_contact("齐齐", "wechat")
+            .expect("find contact")
+            .is_some());
+
+        let inbound = repo
+            .append_message(
+                &contact.id,
+                "other",
+                "我明天面试，有点紧张",
+                "notification",
+                false,
+            )
+            .expect("append inbound");
+        assert_eq!(inbound.source, "notification");
+        repo.record_platform_signal_log(
+            &contact.id,
+            &contact.alias,
+            &contact.channel,
+            "notification",
+            "WeChat",
+            "我明天面试，有点紧张",
+            true,
+            "白名单联系人有新的近似入站信号。",
+        )
+        .expect("signal log");
+        assert_eq!(
+            repo.platform_signal_log_count(&contact.id)
+                .expect("signal count"),
+            1
+        );
+        let adopted = repo
+            .append_message(
+                &contact.id,
+                "me",
+                "明天面试顺利，别给自己太大压力。",
+                "manual",
+                true,
+            )
+            .expect("append adopted");
+        assert!(adopted.approved);
+
+        let recent = repo.recent_messages(&contact.id, 10).expect("recent");
+        assert_eq!(recent.len(), 2);
+
+        let saved = repo
+            .save_memory_candidate_for_contact(
+                Some(&contact.id),
+                &MemoryCandidate {
+                    memory_type: "event".to_string(),
+                    value: "她明天有面试".to_string(),
+                    source_kind: "notification".to_string(),
+                    source_ref: "toast".to_string(),
+                    source_excerpt: "我明天面试".to_string(),
+                    confidence: 0.9,
+                    sensitivity: "normal".to_string(),
+                    expires_at: String::new(),
+                },
+            )
+            .expect("save scoped memory");
+        assert_eq!(saved.contact_id, contact.id);
+        assert_eq!(
+            repo.confirmed_memories_for_contact(&contact.id, 5)
+                .expect("memories")
+                .len(),
+            1
+        );
+
+        let profile = repo
+            .update_style_profile_from_reply("明天面试顺利，别给自己太大压力。")
+            .expect("style profile");
+        assert_eq!(profile.sample_count, 1);
+        assert!(profile.profile_json.contains("summary"));
+
+        repo.apply_retention(30).expect("retention");
+        repo.clear_contact_context(&contact.id)
+            .expect("clear contact");
+        assert!(repo
+            .recent_messages(&contact.id, 10)
+            .expect("recent after clear")
+            .is_empty());
+        assert_eq!(
+            repo.platform_signal_log_count(&contact.id)
+                .expect("signal count after clear"),
+            0
+        );
+
         let _ = std::fs::remove_file(path);
     }
 }

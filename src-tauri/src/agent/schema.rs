@@ -104,7 +104,7 @@ pub fn candidate_schema() -> serde_json::Value {
                         },
                         "source_kind": {
                             "type": "string",
-                            "enum": ["text", "screenshot"]
+                            "enum": ["clipboard", "screenshot", "notification", "manual", "topic"]
                         },
                         "source_ref": {
                             "type": "string",
@@ -168,7 +168,7 @@ pub fn candidate_schema() -> serde_json::Value {
                         },
                         "source_kind": {
                             "type": "string",
-                            "enum": ["text", "screenshot"]
+                            "enum": ["clipboard", "screenshot", "notification", "manual", "topic"]
                         },
                         "source_ref": {
                             "type": "string",
@@ -214,7 +214,7 @@ pub fn candidate_schema() -> serde_json::Value {
                 "properties": {
                     "source_kind": {
                         "type": "string",
-                        "enum": ["text", "screenshot"]
+                        "enum": ["clipboard", "screenshot", "notification", "manual", "topic"]
                     },
                     "source_ref": {
                         "type": "string",

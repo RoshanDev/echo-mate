@@ -14,6 +14,7 @@
     <div id="status-bar">
       <span id="status-dot"></span>
       <span id="status-text"></span>
+      <select id="contact-select"></select>
       <span id="provider-badge"></span>
       <button id="btn-topic-generate"></button>
       <button id="btn-screenshot-generate"></button>
@@ -23,10 +24,15 @@
       <span id="mode-label"></span>
       <span id="provider-label"></span>
     </div>
+    <div id="inbound-banner" style="display:none"></div>
     <div id="insights-container" style="display:none">
       <section class="insight-section" id="action-section">
         <div class="section-title">当前适合做什么</div>
         <div id="action-card" class="insight-card"></div>
+      </section>
+      <section class="insight-section" id="context-section">
+        <div class="section-title">上下文来源</div>
+        <div id="context-card" class="insight-card"></div>
       </section>
       <section class="insight-section" id="memory-section">
         <div class="section-title">可能值得记住</div>
@@ -87,6 +93,24 @@
         if (command === 'plugin:event|unlisten') {
           listeners.get(args.event)?.delete(args.eventId);
           return Promise.resolve();
+        }
+        if (command === 'list_contacts') {
+          return Promise.resolve([
+            {
+              id: 'contact-1',
+              alias: '齐齐',
+              channel: 'wechat',
+              is_allowlisted: true,
+              created_at: '2026-06-08T10:00:00Z',
+              updated_at: '2026-06-08T10:00:00Z',
+            },
+          ]);
+        }
+        if (command === 'get_settings') {
+          return Promise.resolve({ active_contact_id: 'contact-1' });
+        }
+        if (command === 'set_active_contact' || command === 'delete_context_summary') {
+          return Promise.resolve({ ok: true });
         }
         if (command === 'save_memory_candidate') {
           return Promise.resolve({
@@ -197,20 +221,20 @@
           reason: '她明天有面试，适合轻鼓励后收束。',
           confidence: 0.82,
         },
-        memory_candidates: [{
-          memory_type: 'event',
-          value: '她明天有面试',
-          source_kind: 'text',
+          memory_candidates: [{
+            memory_type: 'event',
+            value: '她明天有面试',
+          source_kind: 'clipboard',
           source_ref: 'clipboard',
           source_excerpt: '我明天面试',
           confidence: 0.9,
           sensitivity: 'normal',
           expires_at: '',
         }],
-        reminder_candidates: [{
-          memory_type: 'event',
-          memory_value: '她明天有面试',
-          source_kind: 'text',
+          reminder_candidates: [{
+            memory_type: 'event',
+            memory_value: '她明天有面试',
+          source_kind: 'clipboard',
           source_ref: 'clipboard',
           source_excerpt: '我明天面试',
           recommended_time: '明晚',
@@ -221,9 +245,25 @@
           sensitivity: 'normal',
         }],
         context_summary: {
-          source_kind: 'text',
+          source_kind: 'clipboard',
           source_ref: 'clipboard',
           summary: '对方提到明天面试。',
+        },
+        context_policy: {
+          allowlisted: true,
+          contact_id: 'contact-1',
+          contact_alias: '齐齐',
+          reason: '当前联系人「齐齐」在白名单中，可保存用户确认的上下文。',
+          can_save_context: true,
+          global_privacy_mode: false,
+        },
+        context_record: {
+          id: 'ctx-1',
+          contact_id: 'contact-1',
+          source_kind: 'clipboard',
+          source_ref: 'clipboard',
+          summary: '对方提到明天面试。',
+          created_at: '2026-06-08T10:00:00Z',
         },
       };
     }
@@ -233,9 +273,16 @@
       window.__mockTauri.emit('candidates-ready', payload());
       await sleep(50);
       assert(document.body.textContent.includes('当前适合做什么'), 'missing action section');
+      assert(document.body.textContent.includes('上下文来源'), 'missing context source section');
+      assert(document.body.textContent.includes('删除这条上下文'), 'missing delete context action');
+      assert(!document.getElementById('popup').textContent.includes('自动发送'), 'popup should not claim auto-send behavior');
       assert(document.body.textContent.includes('可能值得记住'), 'missing memory section');
       assert(document.body.textContent.includes('提醒建议'), 'missing reminder section');
       assert(document.body.textContent.includes('候选 1'), 'missing candidates');
+
+      clickButton('删除这条上下文');
+      await sleep(50);
+      assert(document.body.textContent.includes('已删除这条上下文'), 'context was not deleted in UI');
 
       clickButton('保存');
       await sleep(50);
@@ -261,7 +308,7 @@
           id: 'mem-2',
           memory_type: 'event',
           value: '她明天有面试',
-          source_kind: 'text',
+          source_kind: 'clipboard',
           source_ref: 'clipboard',
           source_excerpt: '我明天面试',
           confidence: 0.86,
@@ -291,6 +338,7 @@
       const commands = window.__mockTauri.calls.map((call) => call.command);
       assert(commands.includes('save_memory_candidate'), 'save command not invoked');
       assert(commands.includes('create_reminder_from_candidate'), 'create reminder command not invoked');
+      assert(commands.includes('delete_context_summary'), 'delete context command not invoked');
       assert(commands.includes('copy_candidate'), 'copy command not invoked');
       result.textContent = 'PASS';
     } catch (error) {

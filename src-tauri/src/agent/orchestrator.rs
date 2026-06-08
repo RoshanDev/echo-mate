@@ -2,8 +2,9 @@ use crate::agent::parser::OutputParser;
 use crate::agent::schema;
 use crate::agent::PromptComposer;
 use crate::domain::{
-    Candidate, CandidateEnvelope, ContextSummaryCandidate, MemoryCandidate, NextAction,
-    ReminderCandidate,
+    Candidate, CandidateEnvelope, ContactInput, ContactRecord, ContextPolicy,
+    ContextSummaryCandidate, ContextSummaryRecord, MemoryCandidate, NextAction, PermissionStatus,
+    PlatformSignal, PlatformSignalResult, ReminderCandidate,
 };
 use crate::platform::clipboard::{ClipboardImage, ClipboardManager};
 use crate::platform::hotkey::HotkeyManager;
@@ -33,6 +34,12 @@ const SCREENSHOT_POLL_ATTEMPTS: usize = 240;
 const REMINDER_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const RECENT_CONTACT_COOLDOWN_MINUTES: i64 = 20;
 const RECENT_CONTACT_SNOOZE_MINUTES: i64 = 30;
+const RECENT_CONTEXT_LIMIT: usize = 8;
+const CONTACT_MEMORY_LIMIT: usize = 8;
+
+fn default_context_retention_days() -> i64 {
+    30
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -47,6 +54,18 @@ pub struct AppConfig {
     pub length: String,
     pub emoji_level: f64,
     pub humor_level: f64,
+    #[serde(default)]
+    pub active_contact_id: String,
+    #[serde(default)]
+    pub global_privacy_mode: bool,
+    #[serde(default = "default_context_retention_days")]
+    pub context_retention_days: i64,
+    #[serde(default)]
+    pub windows_notification_helper_enabled: bool,
+    #[serde(default)]
+    pub macos_context_helper_enabled: bool,
+    #[serde(default)]
+    pub macos_accessibility_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -63,6 +82,12 @@ impl Default for AppConfig {
             length: "short_to_medium".into(),
             emoji_level: 0.2,
             humor_level: 0.3,
+            active_contact_id: String::new(),
+            global_privacy_mode: false,
+            context_retention_days: default_context_retention_days(),
+            windows_notification_helper_enabled: false,
+            macos_context_helper_enabled: false,
+            macos_accessibility_enabled: false,
         }
     }
 }
@@ -288,9 +313,11 @@ impl Orchestrator {
         self.emit_generation_started(app, "text", Some(text.len()));
 
         let config = self.config.lock().unwrap().clone();
+        let generation_context = self.generation_context(&config);
         let system_prompt = self.prompt_composer.system_prompt();
         let task_prompt = self.prompt_composer.task_prompt(
             &text,
+            &generation_context.context_block,
             &config.tone,
             &config.length,
             config.emoji_level,
@@ -301,7 +328,7 @@ impl Orchestrator {
         let (schema_path, schema_json) = self.write_schema().await?;
 
         let result = if e2e_mock_provider_enabled() {
-            Ok(mock_e2e_envelope("text"))
+            Ok(mock_e2e_envelope("clipboard"))
         } else {
             self.call_provider(&config, &full_prompt, &schema_json, &schema_path)
                 .await
@@ -309,8 +336,21 @@ impl Orchestrator {
 
         match result {
             Ok(envelope) => {
-                self.persist_context_summary(&envelope, "text");
-                self.emit_candidates_ready(app, &envelope, &config.primary_provider, "standard");
+                let envelope = self.apply_context_policy(envelope, &generation_context);
+                let context_record = self.persist_generation_artifacts(
+                    &envelope,
+                    "clipboard",
+                    &generation_context,
+                    Some(&text),
+                );
+                self.emit_candidates_ready(
+                    app,
+                    &envelope,
+                    &config.primary_provider,
+                    "standard",
+                    &generation_context.policy,
+                    context_record.as_ref(),
+                );
                 self.remember_generation_input(input);
                 Ok(envelope)
             }
@@ -337,10 +377,12 @@ impl Orchestrator {
         self.emit_generation_started(app, "screenshot", None);
 
         let config = self.config.lock().unwrap().clone();
+        let generation_context = self.generation_context(&config);
         let system_prompt = self.prompt_composer.system_prompt();
         let task_prompt = self.prompt_composer.screenshot_task_prompt(
             screenshot.width,
             screenshot.height,
+            &generation_context.context_block,
             &config.tone,
             &config.length,
             config.emoji_level,
@@ -358,8 +400,21 @@ impl Orchestrator {
 
         match result {
             Ok((envelope, provider)) => {
-                self.persist_context_summary(&envelope, "screenshot");
-                self.emit_candidates_ready(app, &envelope, &provider, "screenshot");
+                let envelope = self.apply_context_policy(envelope, &generation_context);
+                let context_record = self.persist_generation_artifacts(
+                    &envelope,
+                    "screenshot",
+                    &generation_context,
+                    None,
+                );
+                self.emit_candidates_ready(
+                    app,
+                    &envelope,
+                    &provider,
+                    "screenshot",
+                    &generation_context.policy,
+                    context_record.as_ref(),
+                );
                 self.remember_generation_input(input);
                 Ok(envelope)
             }
@@ -379,8 +434,10 @@ impl Orchestrator {
         self.emit_generation_started(app, "topic", None);
 
         let config = self.config.lock().unwrap().clone();
+        let generation_context = self.generation_context(&config);
         let system_prompt = self.prompt_composer.system_prompt();
         let task_prompt = self.prompt_composer.topic_task_prompt(
+            &generation_context.context_block,
             &config.tone,
             &config.length,
             config.emoji_level,
@@ -398,8 +455,21 @@ impl Orchestrator {
 
         match result {
             Ok(envelope) => {
-                self.persist_context_summary(&envelope, "topic");
-                self.emit_candidates_ready(app, &envelope, &config.primary_provider, "topic");
+                let envelope = self.apply_context_policy(envelope, &generation_context);
+                let context_record = self.persist_generation_artifacts(
+                    &envelope,
+                    "topic",
+                    &generation_context,
+                    None,
+                );
+                self.emit_candidates_ready(
+                    app,
+                    &envelope,
+                    &config.primary_provider,
+                    "topic",
+                    &generation_context.policy,
+                    context_record.as_ref(),
+                );
                 self.remember_generation_input(input);
                 Ok(envelope)
             }
@@ -435,6 +505,8 @@ impl Orchestrator {
         envelope: &CandidateEnvelope,
         provider: &str,
         mode: &str,
+        policy: &ContextPolicy,
+        context_record: Option<&ContextSummaryRecord>,
     ) {
         if let Err(errs) = self.parser.validate(envelope) {
             tracing::warn!("Validation warnings: {:?}", errs);
@@ -447,6 +519,8 @@ impl Orchestrator {
                 "memory_candidates": &envelope.memory_candidates,
                 "reminder_candidates": &envelope.reminder_candidates,
                 "context_summary": &envelope.context_summary,
+                "context_policy": policy,
+                "context_record": context_record,
                 "provider": provider,
                 "mode": mode,
             }),
@@ -662,16 +736,211 @@ impl Orchestrator {
         self.window.show_popup(app);
     }
 
-    fn persist_context_summary(&self, envelope: &CandidateEnvelope, fallback_source_kind: &str) {
+    fn generation_context(&self, config: &AppConfig) -> GenerationContext {
+        let contact = if config.active_contact_id.trim().is_empty() {
+            None
+        } else {
+            match self.memory_repo.get_contact(&config.active_contact_id) {
+                Ok(contact) => contact,
+                Err(e) => {
+                    tracing::warn!("Failed to load active contact: {e}");
+                    None
+                }
+            }
+        };
+
+        let allowlisted = contact
+            .as_ref()
+            .map(|contact| contact.is_allowlisted)
+            .unwrap_or(false);
+        let can_save_context = allowlisted && !config.global_privacy_mode;
+        let reason = if config.global_privacy_mode {
+            "全局隐私模式已开启：只生成候选，不保存上下文、记忆或提醒。".to_string()
+        } else if let Some(contact) = contact.as_ref() {
+            if contact.is_allowlisted {
+                format!(
+                    "当前联系人「{}」在白名单中，可保存用户确认的上下文。",
+                    contact.alias
+                )
+            } else {
+                format!(
+                    "当前联系人「{}」未启用白名单：只生成候选，不保存上下文。",
+                    contact.alias
+                )
+            }
+        } else {
+            "未选择白名单联系人：只生成候选，不保存上下文、记忆或提醒。".to_string()
+        };
+
+        let policy = ContextPolicy {
+            allowlisted,
+            contact_id: contact
+                .as_ref()
+                .map(|contact| contact.id.clone())
+                .unwrap_or_default(),
+            contact_alias: contact
+                .as_ref()
+                .map(|contact| contact.alias.clone())
+                .unwrap_or_default(),
+            reason: reason.clone(),
+            can_save_context,
+            global_privacy_mode: config.global_privacy_mode,
+        };
+        let context_block = self.build_context_block(contact.as_ref(), &policy);
+        GenerationContext {
+            contact,
+            policy,
+            context_block,
+        }
+    }
+
+    fn build_context_block(
+        &self,
+        contact: Option<&ContactRecord>,
+        policy: &ContextPolicy,
+    ) -> String {
+        if !policy.can_save_context {
+            return format!(
+                "- {reason}\n- 必须让 memory_candidates 和 reminder_candidates 返回空数组。\n- 可以继续生成 5 条候选回复，但不要声称已保存任何信息。",
+                reason = policy.reason
+            );
+        }
+
+        let contact = match contact {
+            Some(contact) => contact,
+            None => return policy.reason.clone(),
+        };
+        let recent_messages = self
+            .memory_repo
+            .recent_messages(&contact.id, RECENT_CONTEXT_LIMIT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load recent messages: {e}");
+                Vec::new()
+            });
+        let memories = self
+            .memory_repo
+            .confirmed_memories_for_contact(&contact.id, CONTACT_MEMORY_LIMIT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load contact memories: {e}");
+                Vec::new()
+            });
+        let style_profile = self.memory_repo.style_profile().ok().flatten();
+
+        let mut block = format!(
+            "- 当前联系人：{} / {}\n- 白名单：已启用\n- 保存策略：只保存用户可见来源，用户可删除；记忆/提醒仍需用户确认。",
+            contact.alias, contact.channel
+        );
+        if let Some(profile) = style_profile {
+            block.push_str(&format!(
+                "\n- 风格画像摘要：{}",
+                truncate_for_prompt(&profile.profile_json, 420)
+            ));
+        }
+        if !memories.is_empty() {
+            block.push_str("\n- 已确认联系人记忆：");
+            for memory in memories {
+                block.push_str(&format!(
+                    "\n  - [{}] {}（来源：{}）",
+                    memory.memory_type,
+                    truncate_for_prompt(&memory.value, 80),
+                    truncate_for_prompt(&memory.source_excerpt, 60)
+                ));
+            }
+        }
+        if !recent_messages.is_empty() {
+            block.push_str("\n- 最近上下文：");
+            for message in recent_messages {
+                block.push_str(&format!(
+                    "\n  - {} / {}：{}",
+                    message.role,
+                    message.source,
+                    truncate_for_prompt(&message.text, 100)
+                ));
+            }
+        }
+        block
+    }
+
+    fn apply_context_policy(
+        &self,
+        mut envelope: CandidateEnvelope,
+        context: &GenerationContext,
+    ) -> CandidateEnvelope {
+        if !context.policy.can_save_context {
+            envelope.memory_candidates.clear();
+            envelope.reminder_candidates.clear();
+            return envelope;
+        }
+
+        envelope.memory_candidates.retain(|candidate| {
+            candidate.confidence >= 0.45
+                && !matches!(candidate.sensitivity.as_str(), "high" | "forbidden")
+        });
+        envelope.reminder_candidates.retain(|candidate| {
+            candidate.confidence >= 0.45
+                && !matches!(candidate.sensitivity.as_str(), "high" | "forbidden")
+        });
+        envelope
+    }
+
+    fn persist_generation_artifacts(
+        &self,
+        envelope: &CandidateEnvelope,
+        fallback_source_kind: &str,
+        context: &GenerationContext,
+        incoming_text: Option<&str>,
+    ) -> Option<ContextSummaryRecord> {
+        if !context.policy.can_save_context {
+            return None;
+        }
+        let contact = context.contact.as_ref()?;
+        let config = self.config.lock().unwrap().clone();
+        if let Err(e) = self
+            .memory_repo
+            .apply_retention(config.context_retention_days)
+        {
+            tracing::warn!("Failed to apply retention: {e}");
+        }
+
+        if let Some(text) = incoming_text.filter(|text| !text.trim().is_empty()) {
+            if let Err(e) = self.memory_repo.append_message(
+                &contact.id,
+                "other",
+                text,
+                fallback_source_kind,
+                false,
+            ) {
+                tracing::warn!("Failed to append inbound message: {e}");
+            }
+        }
+
         let mut summary = envelope.context_summary.clone();
         if summary.source_kind.trim().is_empty() {
             summary.source_kind = fallback_source_kind.to_string();
         }
         if summary.summary.trim().is_empty() {
-            return;
+            return None;
         }
-        if let Err(e) = self.memory_repo.insert_context_summary(&summary) {
-            tracing::warn!("Failed to persist context summary: {e}");
+        if incoming_text.is_none() && !matches!(fallback_source_kind, "topic") {
+            if let Err(e) = self.memory_repo.append_message(
+                &contact.id,
+                "other",
+                &summary.summary,
+                fallback_source_kind,
+                false,
+            ) {
+                tracing::warn!("Failed to append summarized message: {e}");
+            }
+        }
+        match self
+            .memory_repo
+            .insert_context_summary_for_contact(Some(&contact.id), &summary)
+        {
+            Ok(record) => Some(record),
+            Err(e) => {
+                tracing::warn!("Failed to persist context summary: {e}");
+                None
+            }
         }
     }
 
@@ -679,8 +948,15 @@ impl Orchestrator {
         &self,
         candidate: crate::domain::MemoryCandidate,
     ) -> Result<crate::domain::MemoryItemRecord, String> {
+        let context = self.generation_context(&self.config.lock().unwrap().clone());
+        let contact_id = context
+            .policy
+            .can_save_context
+            .then_some(context.policy.contact_id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "联系人不在白名单或隐私模式已开启，不能保存这条记忆。".to_string())?;
         self.memory_repo
-            .save_memory_candidate(&candidate)
+            .save_memory_candidate_for_contact(Some(contact_id), &candidate)
             .map_err(|e| e.to_string())
     }
 
@@ -690,9 +966,16 @@ impl Orchestrator {
         candidate: crate::domain::ReminderCandidate,
         trigger_at: Option<String>,
     ) -> Result<crate::domain::ReminderDetail, String> {
+        let context = self.generation_context(&self.config.lock().unwrap().clone());
+        let contact_id = context
+            .policy
+            .can_save_context
+            .then_some(context.policy.contact_id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "联系人不在白名单或隐私模式已开启，不能创建这条提醒。".to_string())?;
         let detail = self
             .memory_repo
-            .create_reminder_from_candidate(&candidate, trigger_at)
+            .create_reminder_from_candidate_for_contact(Some(contact_id), &candidate, trigger_at)
             .map_err(|e| e.to_string())?;
         if let Err(e) = process_due_reminders(app, &self.memory_repo).await {
             tracing::warn!("Failed to process due reminders after create: {e}");
@@ -717,8 +1000,44 @@ impl Orchestrator {
         action: &str,
         candidate_index: i64,
     ) -> Result<crate::domain::ReplyFeedbackRecord, String> {
+        self.record_reply_feedback_with_text(action, candidate_index, "")
+    }
+
+    pub fn record_reply_feedback_with_text(
+        &self,
+        action: &str,
+        candidate_index: i64,
+        candidate_text: &str,
+    ) -> Result<crate::domain::ReplyFeedbackRecord, String> {
+        let context = self.generation_context(&self.config.lock().unwrap().clone());
+        let contact_id = context
+            .policy
+            .can_save_context
+            .then_some(context.policy.contact_id.as_str())
+            .filter(|id| !id.is_empty());
+        if action == "copy" {
+            if let (Some(contact_id), text) = (contact_id, candidate_text.trim()) {
+                if !text.is_empty() {
+                    if let Err(e) = self
+                        .memory_repo
+                        .append_message(contact_id, "me", text, "manual", true)
+                    {
+                        tracing::warn!("Failed to append adopted reply: {e}");
+                    }
+                    if let Err(e) = self.memory_repo.update_style_profile_from_reply(text) {
+                        tracing::warn!("Failed to update style profile: {e}");
+                    }
+                }
+            }
+        }
         self.memory_repo
-            .record_reply_feedback("current", action, candidate_index)
+            .record_reply_feedback_for_contact(
+                "current",
+                action,
+                candidate_index,
+                candidate_text,
+                contact_id,
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -728,6 +1047,156 @@ impl Orchestrator {
         self.memory_repo
             .latest_notified_reminder()
             .map_err(|e| e.to_string())
+    }
+
+    pub fn list_contacts(&self) -> Result<Vec<ContactRecord>, String> {
+        self.memory_repo.list_contacts().map_err(|e| e.to_string())
+    }
+
+    pub fn upsert_contact(&self, contact: ContactInput) -> Result<ContactRecord, String> {
+        self.memory_repo
+            .upsert_contact(&contact)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn delete_contact(&self, id: &str) -> Result<(), String> {
+        self.memory_repo
+            .delete_contact(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn clear_contact_context(&self, id: &str) -> Result<(), String> {
+        self.memory_repo
+            .clear_contact_context(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn delete_context_summary(&self, id: &str) -> Result<(), String> {
+        self.memory_repo
+            .delete_context_summary(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn set_active_contact(&self, contact_id: String) -> Result<(), String> {
+        if !contact_id.trim().is_empty()
+            && self
+                .memory_repo
+                .get_contact(&contact_id)
+                .map_err(|e| e.to_string())?
+                .is_none()
+        {
+            return Err("联系人不存在，不能设为当前上下文。".to_string());
+        }
+        {
+            let mut config = self.config.lock().unwrap();
+            config.active_contact_id = contact_id;
+        }
+        self.save_config_to_disk();
+        Ok(())
+    }
+
+    pub fn permission_status(&self) -> PermissionStatus {
+        let config = self.config.lock().unwrap().clone();
+        PermissionStatus {
+            platform: std::env::consts::OS.to_string(),
+            windows_notification_helper_enabled: config.windows_notification_helper_enabled,
+            windows_notification_available: cfg!(target_os = "windows"),
+            windows_notification_status: if cfg!(target_os = "windows") {
+                "需要 packaged app capability 与用户授权；未授权时降级到热键/截图。".to_string()
+            } else {
+                "当前构建环境不是 Windows，Notification Listener 不可用，已降级到热键/截图。"
+                    .to_string()
+            },
+            macos_context_helper_enabled: config.macos_context_helper_enabled,
+            macos_accessibility_enabled: config.macos_accessibility_enabled,
+            macos_context_status: if cfg!(target_os = "macos") {
+                "可用前台应用、Pasteboard 和 Accessibility 近似上下文；不承诺后台通知读取。"
+                    .to_string()
+            } else {
+                "当前构建环境不是 macOS，macOS 近似 helper 不运行。".to_string()
+            },
+            fallback_path: "权限关闭或平台能力不可用时，继续使用复制、选中文本热键和截图生成。"
+                .to_string(),
+        }
+    }
+
+    pub fn ingest_platform_signal(
+        &self,
+        app: &AppHandle,
+        signal: PlatformSignal,
+    ) -> Result<PlatformSignalResult, String> {
+        let config = self.config.lock().unwrap().clone();
+        if config.global_privacy_mode {
+            return Ok(PlatformSignalResult {
+                allowed: false,
+                reason: "全局隐私模式已开启，入站信号不保存。".to_string(),
+                contact: None,
+                message: None,
+            });
+        }
+        let source = non_empty_signal(&signal.source, "notification");
+        let helper_enabled = match source.as_str() {
+            "notification" => config.windows_notification_helper_enabled,
+            "clipboard" | "manual" | "topic" | "screenshot" => true,
+            _ => false,
+        };
+        if !helper_enabled {
+            return Ok(PlatformSignalResult {
+                allowed: false,
+                reason: "对应平台 helper 未开启，已降级到热键/截图主流程。".to_string(),
+                contact: None,
+                message: None,
+            });
+        }
+        let channel = non_empty_signal(&signal.channel, "wechat");
+        let contact = self
+            .memory_repo
+            .find_allowlisted_contact(&signal.contact_alias, &channel)
+            .map_err(|e| e.to_string())?;
+        let Some(contact) = contact else {
+            return Ok(PlatformSignalResult {
+                allowed: false,
+                reason: "联系人不在白名单，入站信号未保存，也不会触发生成。".to_string(),
+                contact: None,
+                message: None,
+            });
+        };
+        let message = if signal.text.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.memory_repo
+                    .append_message(&contact.id, "other", &signal.text, &source, false)
+                    .map_err(|e| e.to_string())?,
+            )
+        };
+        if let Err(e) = self.memory_repo.record_platform_signal_log(
+            &contact.id,
+            &contact.alias,
+            &contact.channel,
+            &source,
+            &signal.app_name,
+            &signal.text,
+            true,
+            "白名单联系人有新的近似入站信号；未自动生成或发送。",
+        ) {
+            tracing::warn!("Failed to record platform signal log: {e}");
+        }
+        let _ = app.emit(
+            "inbound-signal",
+            serde_json::json!({
+                "contact": &contact,
+                "source": source,
+                "app_name": signal.app_name,
+                "reason": "白名单联系人有新的近似入站信号；EchoMate 不会自动生成或发送。"
+            }),
+        );
+        Ok(PlatformSignalResult {
+            allowed: true,
+            reason: "已记录白名单联系人入站信号；等待用户手动触发生成。".to_string(),
+            contact: Some(contact),
+            message,
+        })
     }
 
     async fn call_provider(
@@ -893,6 +1362,12 @@ impl GenerationInput {
     }
 }
 
+struct GenerationContext {
+    contact: Option<ContactRecord>,
+    policy: ContextPolicy,
+    context_block: String,
+}
+
 #[derive(Clone)]
 struct ScreenshotInput {
     path: PathBuf,
@@ -924,6 +1399,26 @@ fn truncate_error(raw: &str) -> String {
         trimmed.to_string()
     } else {
         format!("{head}...")
+    }
+}
+
+fn truncate_for_prompt(raw: &str, max_chars: usize) -> String {
+    let trimmed = raw.trim();
+    let mut chars = trimmed.chars();
+    let head = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_none() {
+        trimmed.to_string()
+    } else {
+        format!("{head}...")
+    }
+}
+
+fn non_empty_signal(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -961,7 +1456,7 @@ async fn process_due_reminders(app: &AppHandle, repo: &MemoryRepository) -> anyh
         }
 
         let cooldown_since = now - ChronoDuration::minutes(RECENT_CONTACT_COOLDOWN_MINUTES);
-        if repo.has_recent_copy_feedback(cooldown_since)? {
+        if repo.has_recent_copy_feedback(cooldown_since)? && !e2e_disable_cooldown_enabled() {
             repo.snooze_reminder(
                 &reminder_id,
                 now + ChronoDuration::minutes(RECENT_CONTACT_SNOOZE_MINUTES),
@@ -1013,6 +1508,7 @@ fn show_reminder_panel(app: &AppHandle) {
             }
             "#,
         );
+        let _ = window.set_always_on_top(false);
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -1065,6 +1561,12 @@ fn e2e_skip_screenclip_enabled() -> bool {
 
 fn e2e_disable_quiet_hours_enabled() -> bool {
     std::env::var("ECHOMATE_E2E_DISABLE_QUIET_HOURS")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn e2e_disable_cooldown_enabled() -> bool {
+    std::env::var("ECHOMATE_E2E_DISABLE_COOLDOWN")
         .map(|value| value == "1")
         .unwrap_or(false)
 }

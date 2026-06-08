@@ -9,6 +9,10 @@ let isGenerating = false;
 let currentActionCard = null;
 let currentMemoryCandidates = [];
 let currentReminderCandidates = [];
+let currentContextSummary = null;
+let currentContextPolicy = null;
+let currentContextRecord = null;
+let currentContacts = [];
 
 // Card color palette — cycles through 5 tints
 const CARD_COLORS = ['card-green', 'card-blue', 'card-purple', 'card-coral', 'card-pink'];
@@ -43,8 +47,10 @@ document.addEventListener('DOMContentLoaded', () => {
   listen('generation-error', handleError);
   listen('generation-started', handleGenerationStarted);
   listen('reminder-due', handleReminderDue);
+  listen('inbound-signal', handleInboundSignal);
 
   setupButtons();
+  loadContacts();
   recoverReminderPanel();
 });
 
@@ -72,6 +78,17 @@ function setupButtons() {
       triggerGeneration('generate_replies_from_screenshot', undefined, '框选聊天截图...');
     });
   }
+
+  const contactSelect = document.getElementById('contact-select');
+  if (contactSelect) {
+    contactSelect.addEventListener('change', async () => {
+      await safeInvoke('set_active_contact', { contactId: contactSelect.value }).catch(() => {});
+      const selected = currentContacts.find((contact) => contact.id === contactSelect.value);
+      document.getElementById('status-text').textContent = selected
+        ? '当前联系人：' + selected.alias
+        : '未选择联系人，不保存上下文';
+    });
+  }
 }
 
 function triggerGeneration(cmd, args, loadingText) {
@@ -97,6 +114,9 @@ function handleCandidatesReady(event) {
   currentActionCard = data.action_card || null;
   currentMemoryCandidates = data.memory_candidates || [];
   currentReminderCandidates = data.reminder_candidates || [];
+  currentContextSummary = data.context_summary || null;
+  currentContextPolicy = data.context_policy || null;
+  currentContextRecord = data.context_record || null;
   currentProvider = data.provider || 'codex';
 
   document.getElementById('status-text').textContent = '已生成 ' + currentCandidates.length + ' 条候选回复';
@@ -144,15 +164,25 @@ function handleReminderDue(event) {
   document.getElementById('status-text').textContent = '有一条跟进提醒';
 }
 
+function handleInboundSignal(event) {
+  const payload = event.payload || {};
+  const contact = payload.contact || {};
+  const banner = document.getElementById('inbound-banner');
+  banner.style.display = 'block';
+  banner.textContent = (contact.alias || '白名单联系人') + ' 有新消息信号，EchoMate 不会自动生成或发送';
+}
+
 // ≡≡≡ Render ≡≡≡
 function renderInsights() {
   const container = document.getElementById('insights-container');
   const hasAction = currentActionCard && currentActionCard.reason;
+  const hasContext = currentContextSummary || currentContextPolicy;
   const hasMemory = currentMemoryCandidates.length > 0;
   const hasReminder = currentReminderCandidates.length > 0;
 
-  container.style.display = (hasAction || hasMemory || hasReminder) ? 'block' : 'none';
+  container.style.display = (hasAction || hasContext || hasMemory || hasReminder) ? 'block' : 'none';
   renderActionCard(currentActionCard);
+  renderContextCard(currentContextSummary, currentContextPolicy, currentContextRecord);
   renderMemoryCards(currentMemoryCandidates);
   renderReminderCards(currentReminderCandidates);
 }
@@ -170,6 +200,42 @@ function renderActionCard(action) {
     '<div class="action-type">' + escapeHtml(actionLabel(action.action_type)) + '</div>' +
     '<div class="insight-text">' + escapeHtml(action.reason) + '</div>' +
     '<div class="confidence">置信度 ' + confidenceText(action.confidence) + '</div>';
+}
+
+function renderContextCard(summary, policy, record) {
+  const section = document.getElementById('context-section');
+  const card = document.getElementById('context-card');
+  const hasSummary = summary && (summary.summary || summary.source_ref || summary.source_kind);
+  const hasPolicy = policy && policy.reason;
+  if (!hasSummary && !hasPolicy) {
+    section.style.display = 'none';
+    card.innerHTML = '';
+    return;
+  }
+  section.style.display = 'block';
+  const source = summary?.source_excerpt || summary?.source_ref || summary?.source_kind || '当前触发';
+  const allowText = policy?.can_save_context
+    ? '白名单联系人：可保存用户确认的本地上下文'
+    : '联系人不在白名单或隐私模式开启：不保存上下文';
+  card.innerHTML =
+    '<div class="action-type">' + escapeHtml(allowText) + '</div>' +
+    (summary?.summary ? '<div class="insight-text">' + escapeHtml(summary.summary) + '</div>' : '') +
+    '<div class="source-line">来源：' + escapeHtml(source) + '</div>' +
+    (policy?.reason ? '<div class="confidence">' + escapeHtml(policy.reason) + '</div>' : '') +
+    (record?.id
+      ? '<div class="mini-actions"><button class="tiny-btn danger" data-action="delete-context">删除这条上下文</button></div>'
+      : '');
+  const deleteBtn = card.querySelector('[data-action="delete-context"]');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await safeInvoke('delete_context_summary', { id: record.id });
+      currentContextRecord = null;
+      card.innerHTML =
+        '<div class="action-type">已删除这条上下文</div>' +
+        '<div class="confidence">后续生成不会再读取这条摘要。</div>';
+    });
+  }
 }
 
 function renderMemoryCards(items) {
@@ -429,8 +495,33 @@ function datetimeLocalToIso(value) {
 
 function refreshInsightContainer() {
   const container = document.getElementById('insights-container');
-  const hasVisibleCards = container.querySelector('.mini-card') || (currentActionCard && currentActionCard.reason);
+  const hasVisibleCards = container.querySelector('.mini-card') ||
+    (currentActionCard && currentActionCard.reason) ||
+    (currentContextSummary || currentContextPolicy);
   container.style.display = hasVisibleCards ? 'block' : 'none';
+}
+
+async function loadContacts() {
+  try {
+    const [contacts, settings] = await Promise.all([
+      safeInvoke('list_contacts'),
+      safeInvoke('get_settings'),
+    ]);
+    currentContacts = contacts || [];
+    const select = document.getElementById('contact-select');
+    if (!select) return;
+    select.innerHTML = '<option value="">未选择联系人</option>';
+    currentContacts.forEach((contact) => {
+      const option = document.createElement('option');
+      option.value = contact.id;
+      option.textContent = contact.alias + (contact.is_allowlisted ? '' : '（停用）');
+      option.disabled = !contact.is_allowlisted;
+      select.appendChild(option);
+    });
+    select.value = settings?.active_contact_id || '';
+  } catch (err) {
+    console.error('Load contacts failed:', err);
+  }
 }
 
 async function recoverReminderPanel() {

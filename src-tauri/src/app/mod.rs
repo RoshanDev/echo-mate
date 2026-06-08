@@ -54,6 +54,15 @@ pub fn run() {
             ui::commands::delete_memory,
             ui::commands::delete_reminder,
             ui::commands::get_latest_notified_reminder,
+            ui::commands::list_contacts,
+            ui::commands::upsert_contact,
+            ui::commands::delete_contact,
+            ui::commands::clear_contact_context,
+            ui::commands::set_active_contact,
+            ui::commands::delete_context_summary,
+            ui::commands::get_permission_status,
+            ui::commands::get_macos_context_snapshot,
+            ui::commands::ingest_platform_signal,
         ])
         .setup(|app| {
             tracing::info!("EchoMate starting up");

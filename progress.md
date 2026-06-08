@@ -187,3 +187,119 @@
   - Chromium headless frontend harness: pass
   - Windows release E2E runner: pass; `candidates-ready=6`, `reminder-due=1`; covered text button, selected-text hotkey, clipboard-image auto generation, screenshot style regeneration, image fallback hotkey, and proactive topic generation.
   - `make win-run`: pass; Windows release running as PID 60192.
+
+## Session: 2026-06-08
+
+### Phase H: 微信机器人集成可行性规划
+- **Status:** complete
+- Actions taken:
+  - 使用 `$planning-with-files-zh` 工作流读取技能说明，并恢复现有 `task_plan.md`、`findings.md`、`progress.md`。
+  - 读取 `.omx/state/session.json` 与 `.omx/state/current-task-baseline.json`，确认当前 session 和主 worktree 状态。
+  - 读取 `docs/deep-research-report-EchoMate 与微信机器人集成可行性报告.md` 全文。
+  - 抽样核验关键主源：Tencent `openclaw-weixin`、`epiral/weixin-bot` 协议文档、Microsoft Notification Listener、Apple NSWorkspace/Pasteboard/Accessibility。
+  - 对照现有代码中的 `memory_item`、`reminder`、`context_summary`、`reply_feedback`、截图/文本/topic 生成和提醒闭环，形成下一阶段计划。
+  - 在 `task_plan.md` 追加 Phase H 与 W0-W7 微信集成规划阶段。
+  - 在 `findings.md` 追加报告结论、主源校验、代码适配点和风险门槛。
+- Files:
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Verification
+- `git diff --check`: pass
+- 规划文件内容复读检查: pass，`task_plan.md` 已标记 Phase H complete，后续 W0-W7 均为 pending/gated，未误标为已实施。
+
+### Notes
+- 本次只做规划和研究记录，没有修改业务代码。
+- 当前建议路线：正式版先做“近似机器人”；实验性 `weixin-bot` sidecar 需要显式批准后才实施，并且只入站、不自动代发。
+
+### Phase I: 微信近似机器人 Goal 模式实施提示词
+- **Status:** complete
+- Actions taken:
+  - 读取既有 `docs/goal-mode-prompt-EchoMate 产品扩展实施.md` 的结构。
+  - 将 `task_plan.md` 中 Phase W0-W6 转写成新会话可直接执行的 Goal 模式提示词。
+  - 在提示词中明确 hard boundaries：不自动代发、不主动起聊、不抓全量历史、不默认 sidecar。
+  - 将 W7 `weixin-bot` sidecar 标为 gated，要求显式批准后才实施。
+  - 新建 `docs/goal-mode-prompt-EchoMate 微信近似机器人实施.md`。
+- Files:
+  - docs/goal-mode-prompt-EchoMate 微信近似机器人实施.md
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Verification
+- `git diff --check`: pass
+- 目标提示词复读检查: pass，提示词明确从 W0-W6 实施，W7 sidecar gated，不默认自动代发或接机器人。
+
+### Phase W0: 实施前复核与范围锁定
+- **Status:** complete
+- Actions taken:
+  - 使用 `$planning-with-files-zh` 恢复 `task_plan.md`、`findings.md`、`progress.md`，并运行 session catchup；未发现额外未同步上下文。
+  - 读取 `.omx/state/session.json`、`.omx/state/current-task-baseline.json`、`.omx/state/subagent-tracking.json`，确认当前主 worktree active。
+  - 复核 `docs/goal-mode-prompt-EchoMate 微信近似机器人实施.md`、微信集成可行性报告和产品扩展报告。
+  - 重新打开主源核验 Tencent `openclaw-weixin`、`epiral/weixin-bot` 协议文档、Microsoft Notification Listener、Apple NSWorkspace/Pasteboard/Accessibility 文档入口。
+  - 范围锁定为 W1-W6 近似机器人：联系人 allowlist、本地上下文、采用回写、透明权限、Windows 降级 helper、macOS 近似 helper、上下文合并和隐私验证；不做 W7 sidecar。
+- Findings:
+  - Windows Notification Listener 需要 packaged app capability 和用户授权；本轮不能在 Linux/WSL Tauri 开发环境伪装真实监听完成。
+  - macOS 只实现前台应用/Pasteboard/Accessibility 近似能力与权限/降级状态，不承诺后台实时读取微信通知。
+  - 当前代码缺口集中在 `contacts`、`messages`、`style_profile`、权限状态、allowlist gating、PromptComposer 上下文注入、联系人/权限 UI 和测试 harness。
+
+### Phase W1-W5: 微信近似机器人实现
+- **Status:** complete
+- Actions taken:
+  - 新增联系人白名单模型、SQLite migration、repository CRUD、设置页编辑/启用/停用/清空/删除入口。
+  - 新增联系人级 `messages` timeline、`style_profile` 摘要持久化、`platform_signal_log` 判定日志，并复用既有 `memory_item`、`reminder`、`context_summary`、`reply_feedback`。
+  - 将 `active_contact_id`、全局隐私模式、保留期限、Windows/macOS helper 开关和 Accessibility 开关加入 `AppConfig`。
+  - 生成链路合并联系人记忆、最近上下文、风格画像；未白名单或隐私模式开启时不保存上下文、记忆或提醒候选。
+  - 采用/复制候选回写 reply feedback、approved message 和 style profile 摘要。
+  - 实现 `ingest_platform_signal`：只对白名单联系人记录近似入站 signal，发出本地 `inbound-signal` 提示，不自动生成、不自动发送。
+  - 新增 macOS one-shot context snapshot helper：macOS 使用 `osascript`/System Events 尝试读取前台 app、窗口标题、Accessibility 选中文本和 Pasteboard；非 macOS 明确降级。
+  - 弹窗 UI 增加联系人选择、入站 signal banner、上下文来源、删除这条上下文；设置页增加权限边界、helper 开关和联系人管理。
+  - 修复窗口长期置顶问题：`tauri.conf.json` 改为 `alwaysOnTop=false`，所有显示入口显式取消 topmost。
+- Files:
+  - Makefile
+  - frontend/index.html
+  - frontend/main.js
+  - frontend/settings.html
+  - frontend/settings.js
+  - frontend/styles.css
+  - src-tauri/tauri.conf.json
+  - src-tauri/src/agent/orchestrator.rs
+  - src-tauri/src/agent/prompt.rs
+  - src-tauri/src/agent/schema.rs
+  - src-tauri/src/app/mod.rs
+  - src-tauri/src/domain/memory_item.rs
+  - src-tauri/src/domain/mod.rs
+  - src-tauri/src/platform/macos_context.rs
+  - src-tauri/src/platform/mod.rs
+  - src-tauri/src/store/memory_repo.rs
+  - src-tauri/src/store/migrations.rs
+  - src-tauri/src/ui/commands.rs
+  - src-tauri/src/ui/tray.rs
+  - src-tauri/src/ui/window.rs
+  - tests/frontend-memory-reminder-harness.html
+  - tests/frontend-contact-settings-harness.html
+  - tests/windows-e2e-runner.mjs
+
+### Phase W6: 验证与隐私回归
+- **Status:** complete
+- Passed verification:
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml`
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`
+  - `cargo test --manifest-path src-tauri/Cargo.toml`: pass, 14 tests
+  - `cargo check --manifest-path src-tauri/Cargo.toml`: pass
+  - `cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu`: pass
+  - `node --check frontend/main.js`: pass
+  - `node --check frontend/settings.js`: pass
+  - `node --check tests/windows-e2e-runner.mjs`: pass
+  - `chromium-browser --headless=new --disable-gpu --no-sandbox --allow-file-access-from-files --virtual-time-budget=5000 --dump-dom tests/frontend-memory-reminder-harness.html`: pass; `#result` 输出 `PASS`
+  - `chromium-browser --headless=new --disable-gpu --no-sandbox --allow-file-access-from-files --virtual-time-budget=5000 --dump-dom tests/frontend-contact-settings-harness.html`: pass; `#result` 输出 `PASS`
+  - `git diff --check`: pass
+  - `make win-run`: pass after latest Rust changes; Windows release launched
+  - Windows process/topmost check: `responding=True`, `topmost=False`
+  - Windows copy of `tests/windows-e2e-runner.mjs`: `node --check` pass
+  - Full Windows desktop E2E runner: pass with release app and `ECHOMATE_E2E_MOCK_PROVIDER=1`, `ECHOMATE_E2E_SKIP_SCREENCLIP=1`, `ECHOMATE_E2E_DISABLE_QUIET_HOURS=1`, `ECHOMATE_E2E_DISABLE_COOLDOWN=1`, `ECHOMATE_E2E_SKIP_MOVE_WINDOW=1`, temporary `ECHOMATE_E2E_HOTKEY=CmdOrCtrl+Shift+Q`, and WebView2 CDP port 9222.
+  - Windows E2E evidence: output contained `"ok": true`; `eventCounts` were `candidates=6`, `reminders=1`, `inbound=1`; covered allowlisted notification signal without auto-generation, text generation, context merge, memory save, reminder creation/recovery, selected-text hotkey, screenshot generation, screenshot style regeneration, clipboard-image hotkey fallback, and topic generation.
+  - Windows E2E cleanup evidence: original user config restored to `CmdOrCtrl+Shift+X`; post-run process check `responding=True`, `topmost=False`; no `windows-e2e-runner`/`ECHOMATE_E2E` node process remained.
+- Not-tested:
+  - macOS manual verification has not been executed in this Linux/Windows environment: Accessibility switch, selected-text failure fallback, and Pasteboard helper path remain Not-tested. The implemented macOS helper is covered by a non-macOS unit test that asserts explicit unavailable/fallback behavior.

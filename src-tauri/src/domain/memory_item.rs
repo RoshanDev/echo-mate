@@ -9,7 +9,7 @@ fn default_action_type() -> String {
 }
 
 fn default_source_kind() -> String {
-    "text".to_string()
+    "clipboard".to_string()
 }
 
 fn default_sensitivity() -> String {
@@ -105,6 +105,7 @@ impl Default for ContextSummaryCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryItemRecord {
     pub id: String,
+    pub contact_id: String,
     pub memory_type: String,
     pub value: String,
     pub source_kind: String,
@@ -134,6 +135,7 @@ pub struct ReminderRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSummaryRecord {
     pub id: String,
+    pub contact_id: String,
     pub source_kind: String,
     pub source_ref: String,
     pub summary: String,
@@ -155,6 +157,105 @@ pub struct ReminderDetail {
     pub memory_item: MemoryItemRecord,
     pub action_card: NextAction,
     pub follow_up_candidates: Vec<super::message::Candidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactRecord {
+    pub id: String,
+    pub alias: String,
+    pub channel: String,
+    pub is_allowlisted: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub alias: String,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub is_allowlisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageRecord {
+    pub id: String,
+    pub contact_id: String,
+    pub role: String,
+    pub text: String,
+    pub source: String,
+    pub approved: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleProfileRecord {
+    pub id: String,
+    pub profile_json: String,
+    pub sample_count: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPolicy {
+    pub allowlisted: bool,
+    pub contact_id: String,
+    pub contact_alias: String,
+    pub reason: String,
+    pub can_save_context: bool,
+    pub global_privacy_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionStatus {
+    pub platform: String,
+    pub windows_notification_helper_enabled: bool,
+    pub windows_notification_available: bool,
+    pub windows_notification_status: String,
+    pub macos_context_helper_enabled: bool,
+    pub macos_accessibility_enabled: bool,
+    pub macos_context_status: String,
+    pub fallback_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacosContextSnapshot {
+    pub platform: String,
+    pub available: bool,
+    pub helper_enabled: bool,
+    pub accessibility_enabled: bool,
+    pub front_app: String,
+    pub window_title: String,
+    pub selected_text_available: bool,
+    pub selected_text_excerpt: String,
+    pub pasteboard_available: bool,
+    pub pasteboard_excerpt: String,
+    pub status: String,
+    pub fallback_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformSignal {
+    pub contact_alias: String,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default = "default_source_kind")]
+    pub source: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub app_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformSignalResult {
+    pub allowed: bool,
+    pub reason: String,
+    pub contact: Option<ContactRecord>,
+    pub message: Option<MessageRecord>,
 }
 
 /// A learned fact about the conversation contact

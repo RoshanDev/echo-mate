@@ -45,6 +45,7 @@ impl PromptComposer {
     pub fn task_prompt(
         &self,
         incoming_message: &str,
+        conversation_context: &str,
         tone: &str,
         length: &str,
         emoji_level: f64,
@@ -89,6 +90,9 @@ impl PromptComposer {
 当前本地时间：
 - {now}
 
+联系人与本地上下文：
+{conversation_context}
+
 风格要求：
 - {tone_guide}
 - {length_guide}
@@ -116,6 +120,7 @@ impl PromptComposer {
         &self,
         image_width: u32,
         image_height: u32,
+        conversation_context: &str,
         tone: &str,
         length: &str,
         emoji_level: f64,
@@ -123,6 +128,7 @@ impl PromptComposer {
     ) -> String {
         let base = self.task_prompt(
             "见随附聊天截图。请按截图中的视觉方向读取上下文：左侧气泡是对方说的话，右侧气泡是我说的话。重点理解最近几轮对话，尤其是最后一条对方消息，再生成我可以继续发送的回复。",
+            conversation_context,
             tone,
             length,
             emoji_level,
@@ -144,6 +150,7 @@ impl PromptComposer {
     /// Build a prompt for proactive topic starters that do not depend on the latest chat.
     pub fn topic_task_prompt(
         &self,
+        conversation_context: &str,
         tone: &str,
         length: &str,
         emoji_level: f64,
@@ -151,6 +158,7 @@ impl PromptComposer {
     ) -> String {
         let mut base = self.task_prompt(
             "用户当前不是要回复最后一条聊天记录，而是想主动找一个自然、低压的话题开启或续上聊天。请不要假设对方刚刚说了什么，也不要引用不存在的上下文。",
+            conversation_context,
             tone,
             length,
             emoji_level,

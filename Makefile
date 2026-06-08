@@ -25,10 +25,11 @@ build:
 sync-win:
 	@echo "Syncing sources to Windows..."
 	@WIN_PROJECT_WSL="/mnt/c/Users/$$(powershell.exe -NoProfile -Command '$$env:USERNAME' 2>/dev/null | tr -d '\r')/echo-mate"; \
-	mkdir -p "$$WIN_PROJECT_WSL/src-tauri/src" "$$WIN_PROJECT_WSL/frontend"; \
+	mkdir -p "$$WIN_PROJECT_WSL/src-tauri/src" "$$WIN_PROJECT_WSL/frontend" "$$WIN_PROJECT_WSL/tests"; \
 	cp -a src-tauri/src/. "$$WIN_PROJECT_WSL/src-tauri/src/"; \
 	cp -a src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json "$$WIN_PROJECT_WSL/src-tauri/"; \
-	cp -a frontend/. "$$WIN_PROJECT_WSL/frontend/"
+	cp -a frontend/. "$$WIN_PROJECT_WSL/frontend/"; \
+	cp -a tests/. "$$WIN_PROJECT_WSL/tests/"
 
 # Build Windows binary
 win-build: sync-win

@@ -32,6 +32,9 @@
     <div id="status-bar">
       <span id="status-dot"></span>
       <span id="status-text">就绪，自动识别剪贴板文字或截图</span>
+      <select id="contact-select" title="当前上下文联系人">
+        <option value="">未选择联系人</option>
+      </select>
       <span id="provider-badge"></span>
       <button id="btn-topic-generate">💬 找话题</button>
       <button id="btn-screenshot-generate">▣ 框选截图</button>
@@ -43,10 +46,17 @@
       <span id="provider-label"></span>
     </div>
 
+    <div id="inbound-banner" style="display:none"></div>
+
     <div id="insights-container" style="display:none">
       <section class="insight-section" id="action-section">
         <div class="section-title">当前适合做什么</div>
         <div id="action-card" class="insight-card"></div>
+      </section>
+
+      <section class="insight-section" id="context-section">
+        <div class="section-title">上下文来源</div>
+        <div id="context-card" class="insight-card"></div>
       </section>
 
       <section class="insight-section" id="memory-section">

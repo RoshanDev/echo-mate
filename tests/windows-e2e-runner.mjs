@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
-const CDP_URL = 'http://127.0.0.1:9222/json';
-const OUT_DIR = process.env.ECHOMATE_E2E_OUT || 'C:\\Users\\pibao\\echo-mate';
+const CDP_URL = process.env.ECHOMATE_CDP_URL || 'http://127.0.0.1:9222/json';
+const OUT_DIR = process.env.ECHOMATE_E2E_OUT
+  || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'echo-mate') : 'C:\\Users\\pibao\\echo-mate');
+const E2E_HOTKEY = process.env.ECHOMATE_E2E_HOTKEY || '';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -28,7 +30,7 @@ function getJson(url) {
   });
 }
 
-function ps(command, sta = false) {
+function ps(command, sta = false, options = {}) {
   return execFileSync('powershell.exe', [
     ...(sta ? ['-STA'] : []),
     '-NoProfile',
@@ -36,7 +38,7 @@ function ps(command, sta = false) {
     'Bypass',
     '-Command',
     command,
-  ], { encoding: 'utf8' }).trim();
+  ], { encoding: 'utf8', timeout: options.timeoutMs ?? 30000 }).trim();
 }
 
 function setClipboardText(text) {
@@ -84,7 +86,13 @@ function hotkeyVirtualKey(hotkey) {
 }
 
 function moveWindow() {
-  ps(`
+  if (process.env.ECHOMATE_E2E_SKIP_MOVE_WINDOW === '1') {
+    console.warn('[e2e] Window positioning skipped by ECHOMATE_E2E_SKIP_MOVE_WINDOW=1');
+    return;
+  }
+
+  try {
+    ps(`
     Add-Type @"
     using System;
     using System.Runtime.InteropServices;
@@ -95,10 +103,21 @@ function moveWindow() {
     }
 "@
     [E2EWin]::SetProcessDPIAware() | Out-Null
-    $p = Get-Process -Name echo-mate -ErrorAction Stop | Select-Object -First 1
+    $deadline = (Get-Date).AddSeconds(4)
+    do {
+      $p = Get-Process -Name echo-mate -ErrorAction Stop | Select-Object -First 1
+      if ($p.MainWindowHandle -ne 0) { break }
+      Start-Sleep -Milliseconds 150
+    } while ((Get-Date) -lt $deadline)
+    if ($p.MainWindowHandle -eq 0) {
+      throw 'EchoMate main window handle was not ready'
+    }
     [E2EWin]::SetWindowPos($p.MainWindowHandle, [IntPtr]::Zero, 100, 50, 866, 1031, 0x0040) | Out-Null
     [E2EWin]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-  `);
+  `, false, { timeoutMs: 6000 });
+  } catch (error) {
+    console.warn(`[e2e] Window positioning skipped: ${error.message || String(error)}`);
+  }
 }
 
 function captureWindow(name) {
@@ -201,16 +220,20 @@ function runHotkeyWithoutSelection(vk) {
     $form.Width = 420
     $form.Height = 160
     $form.TopMost = $true
-    $label = New-Object System.Windows.Forms.Label
-    $label.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $label.Text = 'No selected text'
-    $form.Controls.Add($label)
+    $text = New-Object System.Windows.Forms.TextBox
+    $text.Multiline = $true
+    $text.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $text.Font = New-Object System.Drawing.Font('Microsoft YaHei', 18)
+    $text.Text = 'No selected text'
+    $form.Controls.Add($text)
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 700
     $timer.Add_Tick({
       $timer.Stop()
-      $form.Focus()
+      $form.Activate()
+      $text.Focus()
+      $text.SelectionStart = $text.TextLength
+      $text.SelectionLength = 0
       [E2EBlankKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
       [E2EBlankKeys]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)
       [E2EBlankKeys]::keybd_event(${vk}, 0, 0, [UIntPtr]::Zero)
@@ -226,6 +249,10 @@ function runHotkeyWithoutSelection(vk) {
       $form.Close()
     })
     $form.Add_Shown({
+      $form.Activate()
+      $text.Focus()
+      $text.SelectionStart = $text.TextLength
+      $text.SelectionLength = 0
       $timer.Start()
       $closeTimer.Start()
     })
@@ -297,6 +324,8 @@ async function domSummary(send) {
     status: document.getElementById('status-text')?.textContent || '',
     candidates: document.querySelectorAll('.candidate-card').length,
     actionVisible: getComputedStyle(document.getElementById('action-section')).display !== 'none',
+    contextVisible: getComputedStyle(document.getElementById('context-section')).display !== 'none',
+    contextText: document.getElementById('context-card')?.textContent || '',
     memoryVisible: getComputedStyle(document.getElementById('memory-section')).display !== 'none',
     reminderVisible: getComputedStyle(document.getElementById('reminder-section')).display !== 'none',
     savedMemory: document.getElementById('memory-cards')?.textContent.includes('已保存') || false,
@@ -308,11 +337,11 @@ async function domSummary(send) {
 async function main() {
   moveWindow();
   const { ws, send } = await connect();
-  const hotkey = configuredHotkey();
+  const hotkey = E2E_HOTKEY || configuredHotkey();
   const hotkeyVk = hotkeyVirtualKey(hotkey);
 
   await evaluate(send, `(() => {
-    window.__e2eCounts = { candidates: 0, reminders: 0 };
+    window.__e2eCounts = { candidates: 0, reminders: 0, inbound: 0 };
     window.__e2eEvents = [];
     const target = { kind: 'Any' };
     const add = (event, key) => window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
@@ -323,8 +352,48 @@ async function main() {
         window.__e2eEvents.push({ event, payload });
       })
     });
-    return Promise.all([add('candidates-ready', 'candidates'), add('reminder-due', 'reminders')]).then(() => true);
+    return Promise.all([
+      add('candidates-ready', 'candidates'),
+      add('reminder-due', 'reminders'),
+      add('inbound-signal', 'inbound')
+    ]).then(() => true);
   })()`);
+
+  await evaluate(send, `window.__TAURI_INTERNALS__.invoke('get_settings')
+    .then((settings) => window.__TAURI_INTERNALS__.invoke('save_settings', {
+      settings: {
+        ...settings,
+        hotkey: ${JSON.stringify(E2E_HOTKEY)} || settings.hotkey,
+        strict_privacy: false,
+        global_privacy_mode: false,
+        windows_notification_helper_enabled: true,
+        context_retention_days: 30
+      }
+    }))
+    .then(() => window.__TAURI_INTERNALS__.invoke('upsert_contact', {
+      contact: { id: null, alias: '齐齐', channel: 'wechat', is_allowlisted: true }
+    }))
+    .then((contact) => window.__TAURI_INTERNALS__.invoke('set_active_contact', { contactId: contact.id }))`);
+
+  const beforeInboundCandidates = await evaluate(send, `window.__e2eCounts.candidates`);
+  const inboundResult = await evaluate(send, `window.__TAURI_INTERNALS__.invoke('ingest_platform_signal', {
+    signal: {
+      contact_alias: '齐齐',
+      channel: 'wechat',
+      source: 'notification',
+      text: '我明天面试，有点紧张',
+      app_name: 'WeChat'
+    }
+  })`);
+  if (!inboundResult?.allowed) {
+    throw new Error(`Expected allowlisted inbound signal, got: ${inboundResult?.reason || 'unknown'}`);
+  }
+  await waitFor(send, `window.__e2eCounts.inbound >= 1`, 'inbound signal event');
+  await sleep(800);
+  const afterInboundCandidates = await evaluate(send, `window.__e2eCounts.candidates`);
+  if (afterInboundCandidates !== beforeInboundCandidates) {
+    throw new Error('Inbound signal auto-generated candidates');
+  }
 
   setClipboardText('我明天面试，有点紧张');
   await evaluate(send, `document.getElementById('btn-test-generate').click(); true`);
@@ -377,11 +446,15 @@ async function main() {
   const topicWindow = captureWindow('e2e-topic-window.png');
 
   const summary = await domSummary(send);
+  if (!summary.contextVisible || !summary.contextText.includes('白名单')) {
+    throw new Error(`Expected merged allowlisted context, got: ${summary.contextText}`);
+  }
   ws.close();
   console.log(JSON.stringify({
     ok: true,
     hotkey,
     copied: copied.trim(),
+    inboundResult,
     summary,
     screenshots: {
       textDom,

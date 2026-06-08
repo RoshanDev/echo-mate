@@ -1,7 +1,10 @@
 use crate::agent::orchestrator::{AppConfig, OrchestratorState};
 use crate::domain::{
-    MemoryCandidate, MemoryItemRecord, ReminderCandidate, ReminderDetail, ReplyFeedbackRecord,
+    ContactInput, ContactRecord, MacosContextSnapshot, MemoryCandidate, MemoryItemRecord,
+    PermissionStatus, PlatformSignal, PlatformSignalResult, ReminderCandidate, ReminderDetail,
+    ReplyFeedbackRecord,
 };
+use crate::platform::macos_context::MacosContextHelper;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -97,12 +100,12 @@ pub async fn copy_candidate(
     text: String,
 ) -> Result<(), String> {
     app.clipboard()
-        .write_text(text)
+        .write_text(&text)
         .map_err(|e| format!("Clipboard write error: {}", e))?;
     tracing::info!("User copied candidate {}", candidate_index);
     let _ = state
         .0
-        .record_reply_feedback("copy", candidate_index as i64)
+        .record_reply_feedback_with_text("copy", candidate_index as i64, &text)
         .map_err(|e| tracing::warn!("Failed to record copy feedback: {e}"));
     let _ = app.emit(
         "copy-recorded",
@@ -125,6 +128,7 @@ pub async fn hide_window(app: AppHandle) -> Result<(), String> {
 pub async fn open_settings(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         // Navigate to settings page within the same window
+        let _ = window.set_always_on_top(false);
         let _ = window.eval("window.location.href = 'settings.html'");
         let _ = window.show();
         let _ = window.set_focus();
@@ -136,6 +140,7 @@ pub async fn open_settings(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn show_popup(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_always_on_top(false);
         let _ = window.eval("window.location.href = 'index.html'");
         let _ = window.show();
         let _ = window.set_focus();
@@ -256,4 +261,91 @@ pub async fn get_latest_notified_reminder(
     state: State<'_, OrchestratorState>,
 ) -> Result<Option<ReminderDetail>, String> {
     state.0.latest_notified_reminder()
+}
+
+/// List local contacts and their allowlist state.
+#[tauri::command]
+pub async fn list_contacts(
+    state: State<'_, OrchestratorState>,
+) -> Result<Vec<ContactRecord>, String> {
+    state.0.list_contacts()
+}
+
+/// Create or update a local contact.
+#[tauri::command]
+pub async fn upsert_contact(
+    state: State<'_, OrchestratorState>,
+    contact: ContactInput,
+) -> Result<ContactRecord, String> {
+    state.0.upsert_contact(contact)
+}
+
+/// Delete a contact and clear its local context.
+#[tauri::command]
+pub async fn delete_contact(state: State<'_, OrchestratorState>, id: String) -> Result<(), String> {
+    state.0.delete_contact(&id)
+}
+
+/// Clear recent messages and context summaries for a contact.
+#[tauri::command]
+pub async fn clear_contact_context(
+    state: State<'_, OrchestratorState>,
+    id: String,
+) -> Result<(), String> {
+    state.0.clear_contact_context(&id)
+}
+
+/// Set the active contact used for prompt context and allowlist gating.
+#[tauri::command]
+pub async fn set_active_contact(
+    state: State<'_, OrchestratorState>,
+    contact_id: String,
+) -> Result<(), String> {
+    state.0.set_active_contact(contact_id)
+}
+
+/// Delete a persisted context summary from the popup.
+#[tauri::command]
+pub async fn delete_context_summary(
+    state: State<'_, OrchestratorState>,
+    id: String,
+) -> Result<(), String> {
+    state.0.delete_context_summary(&id)
+}
+
+/// Return transparent platform permission/fallback state.
+#[tauri::command]
+pub async fn get_permission_status(
+    state: State<'_, OrchestratorState>,
+) -> Result<PermissionStatus, String> {
+    Ok(state.0.permission_status())
+}
+
+/// Return a one-shot macOS approximate context snapshot without saving it.
+#[tauri::command]
+pub async fn get_macos_context_snapshot(
+    app: AppHandle,
+    state: State<'_, OrchestratorState>,
+) -> Result<MacosContextSnapshot, String> {
+    let config = state.0.config.lock().unwrap().clone();
+    let pasteboard_text = if cfg!(target_os = "macos") && config.macos_context_helper_enabled {
+        app.clipboard().read_text().ok()
+    } else {
+        None
+    };
+    Ok(MacosContextHelper::collect(
+        config.macos_context_helper_enabled,
+        config.macos_accessibility_enabled,
+        pasteboard_text,
+    ))
+}
+
+/// Accept a local approximate inbound signal without auto-generating or sending.
+#[tauri::command]
+pub async fn ingest_platform_signal(
+    app: AppHandle,
+    state: State<'_, OrchestratorState>,
+    signal: PlatformSignal,
+) -> Result<PlatformSignalResult, String> {
+    state.0.ingest_platform_signal(&app, signal)
 }

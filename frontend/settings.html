@@ -57,10 +57,58 @@
         <span class="hint">不记录原始消息全文</span>
       </div>
       <div class="setting-row">
+        <label>全局隐私模式</label>
+        <input type="checkbox" id="setting-global-privacy" />
+        <span class="hint">只生成候选，不保存上下文、记忆或提醒</span>
+      </div>
+      <div class="setting-row">
+        <label>上下文保留</label>
+        <input type="number" id="setting-retention-days" value="30" min="1" max="365" />
+        <span class="hint">天</span>
+      </div>
+      <div class="setting-row">
         <label>数据库加密</label>
         <input type="checkbox" id="setting-sqlcipher" />
         <span class="hint">使用 SQLCipher 加密数据库</span>
       </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>联系人白名单</h3>
+      <div class="contact-editor">
+        <input type="hidden" id="contact-id" />
+        <input type="text" id="contact-alias" placeholder="联系人别名，例如 齐齐" />
+        <select id="contact-channel">
+          <option value="wechat">微信</option>
+          <option value="manual">手动</option>
+        </select>
+        <label class="inline-check">
+          <input type="checkbox" id="contact-allowlisted" checked />
+          启用
+        </label>
+        <button id="btn-save-contact" class="small-btn">保存联系人</button>
+      </div>
+      <div id="contacts-list" class="settings-list"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>权限与平台近似能力</h3>
+      <div class="setting-row">
+        <label>Windows 通知 helper</label>
+        <input type="checkbox" id="setting-windows-helper" />
+        <span class="hint">可选；需系统授权，失败会降级</span>
+      </div>
+      <div class="setting-row">
+        <label>macOS 上下文 helper</label>
+        <input type="checkbox" id="setting-macos-helper" />
+        <span class="hint">只做前台/Pasteboard/Accessibility 近似</span>
+      </div>
+      <div class="setting-row">
+        <label>Accessibility</label>
+        <input type="checkbox" id="setting-macos-accessibility" />
+        <span class="hint">用户主动开启，随时可关闭</span>
+      </div>
+      <div id="permission-status" class="permission-box"></div>
     </div>
 
     <div class="settings-section">

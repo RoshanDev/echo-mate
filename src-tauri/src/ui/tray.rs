@@ -23,6 +23,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     if has_notified_reminder {
                         let _ = window.eval("window.location.href = 'index.html#reminders'");
                     }
+                    let _ = window.set_always_on_top(false);
                     let _ = window.show();
                     let _ = window.set_focus();
                 }

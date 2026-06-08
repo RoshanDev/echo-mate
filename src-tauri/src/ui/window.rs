@@ -9,6 +9,7 @@ impl WindowManager {
 
     pub fn show_popup(&self, app: &AppHandle) {
         if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_always_on_top(false);
             let _ = window.show();
             let _ = window.set_focus();
         }
@@ -25,6 +26,7 @@ impl WindowManager {
             if window.is_visible().unwrap_or(false) {
                 let _ = window.hide();
             } else {
+                let _ = window.set_always_on_top(false);
                 let _ = window.show();
                 let _ = window.set_focus();
             }

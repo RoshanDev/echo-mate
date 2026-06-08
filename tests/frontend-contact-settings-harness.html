@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>EchoMate Contact Settings Harness</title>
+  <link rel="stylesheet" href="../frontend/styles.css">
+</head>
+<body class="settings-body">
+  <div id="settings-page">
+    <button id="btn-back"></button>
+    <input id="setting-hotkey" value="CmdOrCtrl+Shift+Space">
+    <select id="setting-primary-provider"><option value="claude">Claude</option><option value="codex">Codex</option></select>
+    <select id="setting-fallback-provider"><option value="claude">Claude</option><option value="codex">Codex</option><option value="none">无</option></select>
+    <input id="setting-candidate-count" value="5">
+    <input id="setting-timeout" value="45">
+    <input id="setting-strict-privacy" type="checkbox">
+    <input id="setting-global-privacy" type="checkbox">
+    <input id="setting-retention-days" value="30">
+    <input id="setting-sqlcipher" type="checkbox">
+    <input id="setting-windows-helper" type="checkbox">
+    <input id="setting-macos-helper" type="checkbox">
+    <input id="setting-macos-accessibility" type="checkbox">
+    <select id="setting-tone"><option value="warm_calm">温和冷静</option></select>
+    <select id="setting-length"><option value="short_to_medium">短到中等</option></select>
+    <input id="setting-emoji" value="0.2">
+    <input id="setting-humor" value="0.3">
+
+    <input type="hidden" id="contact-id">
+    <input id="contact-alias" placeholder="联系人别名">
+    <select id="contact-channel"><option value="wechat">微信</option><option value="manual">手动</option></select>
+    <input id="contact-allowlisted" type="checkbox" checked>
+    <button id="btn-save-contact">保存联系人</button>
+    <div id="contacts-list"></div>
+    <div id="permission-status"></div>
+
+    <button id="btn-save-settings">保存设置</button>
+    <button id="btn-reset-settings">恢复默认</button>
+    <button id="btn-record-hotkey">录制</button>
+  </div>
+  <pre id="result">RUNNING</pre>
+
+  <script>
+    const calls = [];
+    let contacts = [{
+      id: 'contact-1',
+      alias: '齐齐',
+      channel: 'wechat',
+      is_allowlisted: true,
+      created_at: '2026-06-08T10:00:00Z',
+      updated_at: '2026-06-08T10:00:00Z',
+    }];
+
+    window.__TAURI_INTERNALS__ = {
+      transformCallback(callback) { return callback; },
+      unregisterCallback() {},
+      invoke(command, args = {}) {
+        calls.push({ command, args });
+        if (command === 'get_settings') {
+          return Promise.resolve({
+            hotkey: 'CmdOrCtrl+Shift+Space',
+            primary_provider: 'claude',
+            fallback_provider: 'claude',
+            candidate_count: 5,
+            timeout_seconds: 45,
+            strict_privacy: true,
+            global_privacy_mode: false,
+            context_retention_days: 30,
+            sqlcipher: false,
+            windows_notification_helper_enabled: false,
+            macos_context_helper_enabled: false,
+            macos_accessibility_enabled: false,
+            tone: 'warm_calm',
+            length: 'short_to_medium',
+            emoji_level: 0.2,
+            humor_level: 0.3,
+          });
+        }
+        if (command === 'list_contacts') return Promise.resolve(contacts);
+        if (command === 'upsert_contact') {
+          const next = {
+            id: args.contact.id || 'contact-2',
+            alias: args.contact.alias,
+            channel: args.contact.channel,
+            is_allowlisted: args.contact.is_allowlisted,
+            created_at: '2026-06-08T10:00:00Z',
+            updated_at: '2026-06-08T10:00:00Z',
+          };
+          contacts = contacts.filter((contact) => contact.id !== next.id).concat(next);
+          return Promise.resolve(next);
+        }
+        if (command === 'clear_contact_context') return Promise.resolve({ ok: true });
+        if (command === 'delete_contact') {
+          contacts = contacts.filter((contact) => contact.id !== args.id);
+          return Promise.resolve({ ok: true });
+        }
+        if (command === 'get_permission_status') {
+          return Promise.resolve({
+            platform: 'linux',
+            windows_notification_status: '当前构建环境不是 Windows，Notification Listener 不可用，已降级到热键/截图。',
+            macos_context_status: '当前构建环境不是 macOS，macOS 近似 helper 不运行。',
+            fallback_path: '权限关闭或平台能力不可用时，继续使用复制、选中文本热键和截图生成。',
+          });
+        }
+        if (command === 'get_macos_context_snapshot') {
+          return Promise.resolve({
+            platform: 'linux',
+            available: false,
+            helper_enabled: false,
+            accessibility_enabled: false,
+            front_app: '',
+            window_title: '',
+            selected_text_available: false,
+            selected_text_excerpt: '',
+            pasteboard_available: false,
+            pasteboard_excerpt: '',
+            status: '当前构建环境不是 macOS，macOS 近似 helper 不运行。',
+            fallback_path: '权限关闭或平台能力不可用时，继续使用复制、选中文本热键和截图生成。',
+          });
+        }
+        if (command === 'save_settings' || command === 'reset_settings' || command === 'show_popup') {
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.resolve();
+      },
+    };
+  </script>
+  <script type="module" src="../frontend/settings.js"></script>
+  <script type="module">
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const result = document.getElementById('result');
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+    try {
+      await sleep(100);
+      assert(document.body.textContent.includes('齐齐'), 'existing contact not rendered');
+      assert(document.body.textContent.includes('不会自动发送'), 'permission boundary missing');
+      assert(document.body.textContent.includes('macOS helper'), 'macOS helper snapshot missing');
+
+      document.getElementById('contact-alias').value = '小周';
+      document.getElementById('contact-channel').value = 'wechat';
+      document.getElementById('contact-allowlisted').checked = true;
+      document.getElementById('btn-save-contact').click();
+      await sleep(50);
+      assert(document.body.textContent.includes('小周'), 'new contact not saved');
+
+      [...document.querySelectorAll('button')].find((button) => button.textContent === '清空上下文').click();
+      await sleep(50);
+      assert(calls.some((call) => call.command === 'clear_contact_context'), 'clear context not invoked');
+
+      [...document.querySelectorAll('button')].find((button) => button.textContent === '删除').click();
+      await sleep(50);
+      assert(calls.some((call) => call.command === 'delete_contact'), 'delete contact not invoked');
+
+      document.getElementById('setting-global-privacy').checked = true;
+      document.getElementById('btn-save-settings').click();
+      await sleep(50);
+      assert(calls.some((call) => call.command === 'save_settings' && call.args.settings.global_privacy_mode), 'global privacy not saved');
+      result.textContent = 'PASS';
+    } catch (error) {
+      result.textContent = `FAIL: ${error.message}`;
+      console.error(error);
+    }
+  </script>
+</body>
+</html>
