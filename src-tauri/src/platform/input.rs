@@ -1,9 +1,11 @@
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "windows")]
 use enigo::{
     Direction::{Click, Press, Release},
     Enigo, Key, Keyboard, Settings,
 };
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "macos")]
+use std::process::Command;
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 pub struct InputSimulator;
@@ -15,7 +17,7 @@ impl InputSimulator {
 
     /// Simulate Ctrl/Cmd+C to copy current selection
     /// NOTE: Requires Accessibility permission on macOS.
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     pub fn copy_selection(&self) -> Result<(), String> {
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| format!("Input simulation unavailable: {e}"))?;
@@ -40,15 +42,32 @@ impl InputSimulator {
         release_result
     }
 
+    /// Simulate Cmd+C through System Events on macOS.
+    ///
+    /// Enigo's macOS keyboard path can touch input-source APIs that must run on
+    /// the main dispatch queue. Hotkey handling runs on a Tokio worker, so use
+    /// AppleScript here to avoid crashing the process while preserving the same
+    /// user-visible behavior.
+    #[cfg(target_os = "macos")]
+    pub fn copy_selection(&self) -> Result<(), String> {
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(r#"tell application "System Events" to keystroke "c" using command down"#)
+            .output()
+            .map_err(|e| format!("Input simulation unavailable: {e}"))?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Failed to press copy shortcut: {}", stderr.trim()))
+        }
+    }
+
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     pub fn copy_selection(&self) -> Result<(), String> {
         Err("Auto-copy selection is only supported on Windows and macOS".into())
     }
-}
-
-#[cfg(target_os = "macos")]
-fn copy_modifier() -> Key {
-    Key::Command
 }
 
 #[cfg(target_os = "windows")]

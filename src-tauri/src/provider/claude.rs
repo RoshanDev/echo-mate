@@ -128,47 +128,103 @@ fn parse_json_output(stdout: &str) -> anyhow::Result<CandidateEnvelope> {
         )
     })?;
 
-    if let Some(so) = wrapped.get("structured_output") {
-        if !so.is_null() {
-            if let Ok(env) = serde_json::from_value::<CandidateEnvelope>(so.clone()) {
-                tracing::info!("Parsed candidates from structured_output");
-                return Ok(env);
-            }
-        }
-    }
-
-    if let Some(result_val) = wrapped.get("result") {
-        if !result_val.is_null() {
-            if let Ok(env) = serde_json::from_value::<CandidateEnvelope>(result_val.clone()) {
-                tracing::info!("Parsed candidates from result field (object)");
-                return Ok(env);
-            }
-            if let Some(s) = result_val.as_str() {
-                if let Ok(env) = serde_json::from_str::<CandidateEnvelope>(s) {
-                    tracing::info!("Parsed candidates from result field (string)");
-                    return Ok(env);
-                }
-                if let Some(start) = s.find('{') {
-                    if let Some(end) = s.rfind('}') {
-                        if let Ok(env) = serde_json::from_str::<CandidateEnvelope>(&s[start..=end])
-                        {
-                            tracing::info!("Parsed candidates from JSON embedded in result text");
-                            return Ok(env);
-                        }
-                    }
-                }
-            }
-        }
+    if let Some((env, source)) = parse_candidate_envelope(&wrapped) {
+        tracing::info!("Parsed candidates from {source}");
+        return Ok(env);
     }
 
     anyhow::bail!(
-        "Failed to parse CandidateEnvelope. Keys: {:?}. result(first 300): {:.300}",
-        wrapped
-            .as_object()
-            .map(|o| o.keys().collect::<Vec<_>>())
-            .unwrap_or_default(),
+        "Failed to parse CandidateEnvelope. Top-level: {}. Keys: {:?}. result(first 300): {:.300}",
+        value_kind(&wrapped),
+        object_keys(&wrapped),
         wrapped.get("result").and_then(|v| v.as_str()).unwrap_or(""),
     )
+}
+
+fn parse_candidate_envelope(
+    value: &serde_json::Value,
+) -> Option<(CandidateEnvelope, &'static str)> {
+    if let Ok(env) = serde_json::from_value::<CandidateEnvelope>(value.clone()) {
+        return Some((env, "direct object"));
+    }
+
+    if let Some(so) = value
+        .get("structured_output")
+        .filter(|item| !item.is_null())
+    {
+        if let Some((env, _)) = parse_candidate_envelope(so) {
+            return Some((env, "structured_output"));
+        }
+    }
+
+    if let Some(result) = value.get("result").filter(|item| !item.is_null()) {
+        if let Some((env, _)) = parse_candidate_envelope(result) {
+            return Some((env, "result field"));
+        }
+        if let Some(text) = result.as_str() {
+            if let Some(env) = parse_candidate_envelope_from_text(text) {
+                return Some((env, "result text"));
+            }
+        }
+    }
+
+    if let Some(content) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())
+    {
+        for item in content.iter().rev() {
+            if item.get("name").and_then(|name| name.as_str()) == Some("StructuredOutput") {
+                if let Some(input) = item.get("input") {
+                    if let Some((env, _)) = parse_candidate_envelope(input) {
+                        return Some((env, "StructuredOutput tool input"));
+                    }
+                }
+            }
+            if let Some(text) = item.get("text").and_then(|text| text.as_str()) {
+                if let Some(env) = parse_candidate_envelope_from_text(text) {
+                    return Some((env, "assistant text"));
+                }
+            }
+        }
+    }
+
+    if let Some(items) = value.as_array() {
+        for item in items.iter().rev() {
+            if let Some((env, source)) = parse_candidate_envelope(item) {
+                return Some((env, source));
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_candidate_envelope_from_text(text: &str) -> Option<CandidateEnvelope> {
+    if let Ok(env) = serde_json::from_str::<CandidateEnvelope>(text) {
+        return Some(env);
+    }
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    serde_json::from_str::<CandidateEnvelope>(&text[start..=end]).ok()
+}
+
+fn value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn object_keys(value: &serde_json::Value) -> Vec<&String> {
+    value
+        .as_object()
+        .map(|object| object.keys().collect::<Vec<_>>())
+        .unwrap_or_default()
 }
 
 #[cfg(all(test, unix))]
@@ -229,6 +285,85 @@ printf '%s\n' '{"structured_output":{"candidates":[]}}'
         assert!(err.to_string().contains("process was terminated"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_claude_code_json_event_stream_structured_output() {
+        let raw = serde_json::json!([
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "test"
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "StructuredOutput",
+                            "input": {
+                                "candidates": [
+                                    {
+                                        "text": "最近有吃到什么好吃的吗，推荐一下～",
+                                        "style_tags": ["稳妥"],
+                                        "risk_flags": ["none"],
+                                        "reason": "低压开启话题"
+                                    }
+                                ],
+                                "action_card": {
+                                    "action_type": "light_follow_up",
+                                    "reason": "自然延续",
+                                    "confidence": 0.88
+                                },
+                                "memory_candidates": [],
+                                "reminder_candidates": [],
+                                "context_summary": {
+                                    "source_kind": "manual",
+                                    "source_ref": "主动找齐齐开启话题",
+                                    "summary": "主动找话题"
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "human readable markdown",
+                "structured_output": {
+                    "candidates": [
+                        {
+                            "text": "今天过得怎么样，有没有好好吃饭～",
+                            "style_tags": ["温柔"],
+                            "risk_flags": ["none"],
+                            "reason": "轻关心"
+                        }
+                    ],
+                    "action_card": {
+                        "action_type": "light_follow_up",
+                        "reason": "自然延续",
+                        "confidence": 0.88
+                    },
+                    "memory_candidates": [],
+                    "reminder_candidates": [],
+                    "context_summary": {
+                        "source_kind": "manual",
+                        "source_ref": "主动找齐齐开启话题",
+                        "summary": "主动找话题"
+                    }
+                }
+            }
+        ]);
+        let envelope = parse_json_output(&raw.to_string()).expect("event stream should parse");
+
+        assert_eq!(envelope.candidates.len(), 1);
+        assert_eq!(
+            envelope.candidates[0].text,
+            "今天过得怎么样，有没有好好吃饭～"
+        );
+        assert_eq!(envelope.action_card.action_type, "light_follow_up");
     }
 
     fn test_dir(name: &str) -> PathBuf {
