@@ -291,8 +291,10 @@ function renderStyleProfile(profile) {
   const avgEl = document.getElementById('style-profile-avg');
   const updatedEl = document.getElementById('style-profile-updated');
   const tagsEl = document.getElementById('style-profile-tags');
+  const rulesEl = document.getElementById('style-profile-rules');
   const statusEl = document.getElementById('style-profile-status');
   tagsEl.innerHTML = '';
+  rulesEl.innerHTML = '';
   statusEl.textContent = '';
 
   if (!profile) {
@@ -317,6 +319,16 @@ function renderStyleProfile(profile) {
     tag.className = 'style-tag';
     tag.textContent = label;
     tagsEl.appendChild(tag);
+  });
+
+  const rules = []
+    .concat(Array.isArray(payload.generation_rules) ? payload.generation_rules.slice(0, 4) : [])
+    .concat(Array.isArray(payload.avoid_rules) ? payload.avoid_rules.slice(0, 2) : []);
+  rules.forEach((rule) => {
+    const row = document.createElement('div');
+    row.className = 'style-rule';
+    row.textContent = rule;
+    rulesEl.appendChild(row);
   });
 }
 

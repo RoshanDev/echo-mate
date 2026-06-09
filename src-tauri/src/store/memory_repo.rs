@@ -939,62 +939,316 @@ fn bool_to_i64(value: bool) -> i64 {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct StyleSignals {
+    sample_count: i64,
+    total_chars: usize,
+    question_count: i64,
+    exclamation_count: i64,
+    emoji_count: i64,
+    short_count: i64,
+    medium_count: i64,
+    long_count: i64,
+    latest_chars: usize,
+    latest_tone: String,
+}
+
+impl StyleSignals {
+    fn add_sample(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let chars = text.chars().count();
+        self.sample_count += 1;
+        self.total_chars += chars;
+        if text.contains('？') || text.contains('?') {
+            self.question_count += 1;
+        }
+        if text.contains('！') || text.contains('!') {
+            self.exclamation_count += 1;
+        }
+        self.emoji_count += count_style_emoji_marks(text) as i64;
+        if chars <= 22 {
+            self.short_count += 1;
+        } else if chars <= 45 {
+            self.medium_count += 1;
+        } else {
+            self.long_count += 1;
+        }
+        self.latest_chars = chars;
+        self.latest_tone = detect_style_tone(text).to_string();
+    }
+
+    fn avg_chars(&self) -> f64 {
+        if self.sample_count <= 0 {
+            0.0
+        } else {
+            self.total_chars as f64 / self.sample_count as f64
+        }
+    }
+
+    fn question_rate(&self) -> f64 {
+        ratio(self.question_count, self.sample_count)
+    }
+
+    fn exclamation_rate(&self) -> f64 {
+        ratio(self.exclamation_count, self.sample_count)
+    }
+
+    fn emoji_avg(&self) -> f64 {
+        ratio(self.emoji_count, self.sample_count)
+    }
+
+    fn short_ratio(&self) -> f64 {
+        ratio(self.short_count, self.sample_count)
+    }
+}
+
 fn build_style_profile_json(
     adopted_text: &str,
     existing: Option<&StyleProfileRecord>,
     sample_count: i64,
 ) -> anyhow::Result<String> {
-    let old_average = existing
-        .and_then(|profile| serde_json::from_str::<serde_json::Value>(&profile.profile_json).ok())
-        .and_then(|json| json.get("avg_chars").and_then(|value| value.as_f64()))
-        .unwrap_or(0.0);
-    let chars = adopted_text.chars().count() as f64;
-    let avg_chars = if sample_count <= 1 {
-        chars
-    } else {
-        ((old_average * ((sample_count - 1) as f64)) + chars) / sample_count as f64
-    };
-    let tone = detect_style_tone(adopted_text);
-    let emoji_level = count_style_emoji_marks(adopted_text);
-    let summary = format!(
-        "已采用 {sample_count} 条回复，平均约 {:.0} 字，最近偏向{}；只保存统计摘要，不保存无限原文样本。",
-        avg_chars, tone
-    );
-    serde_json::to_string(&serde_json::json!({
-        "summary": summary,
-        "avg_chars": avg_chars,
-        "tone_labels": [tone],
-        "emoji_marks_recent": emoji_level,
-        "updated_from": "adopted_reply_summary"
-    }))
-    .map_err(Into::into)
+    let previous_count = (sample_count - 1).max(0);
+    let mut signals = existing
+        .and_then(style_signals_from_profile)
+        .unwrap_or_else(|| legacy_style_signals(existing, previous_count));
+    signals.add_sample(adopted_text);
+    build_style_profile_json_from_signals(&signals, "adopted_reply_summary")
 }
 
 fn build_style_profile_json_from_samples(samples: &[String]) -> anyhow::Result<String> {
     if samples.is_empty() {
         bail!("no adopted replies available for style profile");
     }
-    let sample_count = samples.len() as i64;
-    let total_chars = samples
-        .iter()
-        .map(|sample| sample.chars().count())
-        .sum::<usize>() as f64;
-    let avg_chars = total_chars / sample_count as f64;
-    let latest = samples.last().map(String::as_str).unwrap_or_default();
-    let tone = detect_style_tone(latest);
-    let emoji_level = count_style_emoji_marks(latest);
+    let mut signals = StyleSignals::default();
+    for sample in samples {
+        signals.add_sample(sample);
+    }
+    build_style_profile_json_from_signals(&signals, "adopted_reply_rebuild")
+}
+
+fn build_style_profile_json_from_signals(
+    signals: &StyleSignals,
+    updated_from: &str,
+) -> anyhow::Result<String> {
+    if signals.sample_count <= 0 {
+        bail!("no adopted replies available for style profile");
+    }
+    let avg_chars = signals.avg_chars();
+    let sample_count = signals.sample_count;
+    let length_label = length_profile_label(signals);
+    let question_label = question_profile_label(signals.question_rate());
+    let emoji_label = emoji_profile_label(signals.emoji_avg());
+    let punctuation_label = punctuation_profile_label(signals.exclamation_rate());
+    let tone_labels = style_tone_labels(signals);
+    let generation_rules = style_generation_rules(signals);
+    let avoid_rules = style_avoid_rules(signals);
+    let prompt_guide = style_prompt_guide(&generation_rules, &avoid_rules);
     let summary = format!(
-        "已采用 {sample_count} 条回复，平均约 {:.0} 字，最近偏向{}；只保存统计摘要，不保存无限原文样本。",
-        avg_chars, tone
+        "已采用 {sample_count} 条回复：平均约 {:.0} 字，{}；{}；{}；{}。这是可执行写作规则，不是完整人格画像。",
+        avg_chars, length_label, question_label, emoji_label, punctuation_label
     );
+
     serde_json::to_string(&serde_json::json!({
         "summary": summary,
         "avg_chars": avg_chars,
-        "tone_labels": [tone],
-        "emoji_marks_recent": emoji_level,
-        "updated_from": "adopted_reply_rebuild"
+        "tone_labels": tone_labels,
+        "generation_rules": generation_rules,
+        "avoid_rules": avoid_rules,
+        "prompt_guide": prompt_guide,
+        "signals": {
+            "sample_count": sample_count,
+            "total_chars": signals.total_chars,
+            "question_count": signals.question_count,
+            "question_rate": signals.question_rate(),
+            "exclamation_count": signals.exclamation_count,
+            "exclamation_rate": signals.exclamation_rate(),
+            "emoji_count": signals.emoji_count,
+            "emoji_avg": signals.emoji_avg(),
+            "short_count": signals.short_count,
+            "short_ratio": signals.short_ratio(),
+            "medium_count": signals.medium_count,
+            "long_count": signals.long_count,
+            "latest_chars": signals.latest_chars,
+            "latest_tone": signals.latest_tone,
+        },
+        "updated_from": updated_from
     }))
     .map_err(Into::into)
+}
+
+fn style_signals_from_profile(profile: &StyleProfileRecord) -> Option<StyleSignals> {
+    let json = serde_json::from_str::<serde_json::Value>(&profile.profile_json).ok()?;
+    let signals = json.get("signals")?;
+    let sample_count = json_i64(signals, "sample_count").unwrap_or(profile.sample_count);
+    Some(StyleSignals {
+        sample_count,
+        total_chars: json_i64(signals, "total_chars")
+            .unwrap_or_else(|| {
+                (json_f64(&json, "avg_chars").unwrap_or(0.0) * sample_count.max(0) as f64).round()
+                    as i64
+            })
+            .max(0) as usize,
+        question_count: json_i64(signals, "question_count").unwrap_or_default(),
+        exclamation_count: json_i64(signals, "exclamation_count").unwrap_or_default(),
+        emoji_count: json_i64(signals, "emoji_count").unwrap_or_default(),
+        short_count: json_i64(signals, "short_count").unwrap_or_default(),
+        medium_count: json_i64(signals, "medium_count").unwrap_or_default(),
+        long_count: json_i64(signals, "long_count").unwrap_or_default(),
+        latest_chars: json_i64(signals, "latest_chars").unwrap_or_default().max(0) as usize,
+        latest_tone: json_string(signals, "latest_tone").unwrap_or_default(),
+    })
+}
+
+fn legacy_style_signals(existing: Option<&StyleProfileRecord>, sample_count: i64) -> StyleSignals {
+    let Some(profile) = existing else {
+        return StyleSignals::default();
+    };
+    if sample_count <= 0 {
+        return StyleSignals::default();
+    }
+    let json = serde_json::from_str::<serde_json::Value>(&profile.profile_json).ok();
+    let avg_chars = json
+        .as_ref()
+        .and_then(|value| json_f64(value, "avg_chars"))
+        .unwrap_or_default();
+    let latest_tone = json
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("tone_labels")
+                .and_then(|labels| labels.as_array())
+                .and_then(|labels| labels.first())
+                .and_then(|label| label.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_default();
+    let mut signals = StyleSignals {
+        sample_count,
+        total_chars: (avg_chars * sample_count as f64).round() as usize,
+        latest_chars: avg_chars.round().max(0.0) as usize,
+        latest_tone: latest_tone.clone(),
+        ..StyleSignals::default()
+    };
+    if avg_chars <= 22.0 {
+        signals.short_count = sample_count;
+    } else if avg_chars <= 45.0 {
+        signals.medium_count = sample_count;
+    } else {
+        signals.long_count = sample_count;
+    }
+    if latest_tone.contains("提问") {
+        signals.question_count = sample_count;
+    }
+    signals
+}
+
+fn style_tone_labels(signals: &StyleSignals) -> Vec<String> {
+    let mut labels = vec![length_profile_label(signals).to_string()];
+    if signals.question_rate() < 0.25 {
+        labels.push("少追问".to_string());
+    } else if signals.question_rate() >= 0.5 {
+        labels.push("常用问句承接".to_string());
+    }
+    if signals.emoji_avg() < 0.2 {
+        labels.push("少 emoji".to_string());
+    }
+    if !signals.latest_tone.is_empty() && !labels.iter().any(|label| label == &signals.latest_tone)
+    {
+        labels.push(signals.latest_tone.clone());
+    }
+    labels
+}
+
+fn style_generation_rules(signals: &StyleSignals) -> Vec<String> {
+    let mut rules = Vec::new();
+    let avg = signals.avg_chars();
+    if avg <= 18.0 {
+        rules.push("优先 8-20 字，一句话解决，不铺垫。".to_string());
+    } else if avg <= 35.0 {
+        rules.push("优先 12-35 字，短句为主，只表达一个重点。".to_string());
+    } else {
+        rules.push("可以 25-60 字，但要分清重点，避免长段解释。".to_string());
+    }
+    if signals.question_rate() < 0.25 {
+        rules.push("默认先回应情绪或事实，不主动连续追问；需要推进时只问一个轻问题。".to_string());
+    } else {
+        rules.push("可以用短问句承接，但每条候选最多一个问题。".to_string());
+    }
+    if signals.emoji_avg() < 0.2 {
+        rules.push("默认不用 emoji，标点保持克制。".to_string());
+    } else {
+        rules.push("emoji 可以少量使用，但不要堆叠。".to_string());
+    }
+    if signals.exclamation_rate() < 0.25 {
+        rules.push("少用感叹号，语气保持低压自然。".to_string());
+    }
+    rules
+}
+
+fn style_avoid_rules(signals: &StyleSignals) -> Vec<String> {
+    let mut rules = vec![
+        "不要写成客服腔、鸡汤腔或总结报告。".to_string(),
+        "不要替用户做承诺、邀约或强推进关系。".to_string(),
+    ];
+    if signals.short_ratio() >= 0.6 {
+        rules.push("不要生成大段解释，避免把一句话扩成三句话。".to_string());
+    }
+    if signals.question_rate() < 0.25 {
+        rules.push("不要为了显得热情而硬加问号。".to_string());
+    }
+    rules
+}
+
+fn style_prompt_guide(generation_rules: &[String], avoid_rules: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !generation_rules.is_empty() {
+        parts.push(format!("生成规则：{}", generation_rules.join("；")));
+    }
+    if !avoid_rules.is_empty() {
+        parts.push(format!("避免：{}", avoid_rules.join("；")));
+    }
+    parts.join("。")
+}
+
+fn length_profile_label(signals: &StyleSignals) -> &'static str {
+    if signals.avg_chars() <= 18.0 || signals.short_ratio() >= 0.6 {
+        "短句低压"
+    } else if signals.avg_chars() <= 35.0 {
+        "短到中等"
+    } else {
+        "偏解释型"
+    }
+}
+
+fn question_profile_label(rate: f64) -> &'static str {
+    if rate < 0.25 {
+        "很少追问"
+    } else if rate < 0.5 {
+        "偶尔用问句承接"
+    } else {
+        "经常用问句承接"
+    }
+}
+
+fn emoji_profile_label(avg: f64) -> &'static str {
+    if avg < 0.2 {
+        "基本不用 emoji"
+    } else if avg < 1.0 {
+        "偶尔用 emoji"
+    } else {
+        "emoji 较多"
+    }
+}
+
+fn punctuation_profile_label(exclamation_rate: f64) -> &'static str {
+    if exclamation_rate < 0.25 {
+        "感叹号很少"
+    } else {
+        "会用感叹号加强语气"
+    }
 }
 
 fn detect_style_tone(text: &str) -> &'static str {
@@ -1008,9 +1262,35 @@ fn detect_style_tone(text: &str) -> &'static str {
 }
 
 fn count_style_emoji_marks(text: &str) -> usize {
-    text.chars()
-        .filter(|ch| !ch.is_ascii() && !('\u{4e00}'..='\u{9fff}').contains(ch))
-        .count()
+    text.chars().filter(|ch| is_emoji_like(*ch)).count()
+}
+
+fn is_emoji_like(ch: char) -> bool {
+    let code = ch as u32;
+    (0x1F300..=0x1FAFF).contains(&code) || (0x2600..=0x27BF).contains(&code)
+}
+
+fn ratio(value: i64, total: i64) -> f64 {
+    if total <= 0 {
+        0.0
+    } else {
+        value as f64 / total as f64
+    }
+}
+
+fn json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|entry| entry.as_i64())
+}
+
+fn json_f64(value: &serde_json::Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(|entry| entry.as_f64())
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|entry| entry.as_str())
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]

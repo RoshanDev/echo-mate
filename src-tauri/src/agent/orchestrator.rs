@@ -831,9 +831,10 @@ impl Orchestrator {
             contact.alias, contact.channel
         );
         if let Some(profile) = style_profile {
+            let guide = style_profile_prompt_guide(&profile.profile_json);
             block.push_str(&format!(
-                "\n- 风格画像摘要：{}",
-                truncate_for_prompt(&profile.profile_json, 420)
+                "\n- 风格画像指南：{}",
+                truncate_for_prompt(&guide, 560)
             ));
         }
         if !memories.is_empty() {
@@ -1426,6 +1427,45 @@ fn truncate_for_prompt(raw: &str, max_chars: usize) -> String {
         trimmed.to_string()
     } else {
         format!("{head}...")
+    }
+}
+
+fn style_profile_prompt_guide(profile_json: &str) -> String {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(profile_json) else {
+        return profile_json.trim().to_string();
+    };
+    if let Some(guide) = json
+        .get("prompt_guide")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return guide.trim().to_string();
+    }
+
+    let summary = json
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let rules = json
+        .get("generation_rules")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join("；")
+        })
+        .unwrap_or_default();
+    let guide = [summary, &rules]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("。");
+    if guide.is_empty() {
+        profile_json.trim().to_string()
+    } else {
+        guide
     }
 }
 
