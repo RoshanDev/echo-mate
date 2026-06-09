@@ -6,14 +6,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
+  js-syntax:
+    name: JavaScript syntax
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -21,26 +27,38 @@ jobs:
         with:
           node-version: 22
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
       - name: JavaScript syntax checks
-        shell: bash
         run: |
           node --check frontend/main.js
           node --check frontend/settings.js
           node --check tests/windows-e2e-runner.mjs
           node --check tests/macos-smoke-runner.mjs
 
+  rust-test:
+    name: Rust tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: rust-${{ matrix.os }}
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
   build-tauri:
     name: Tauri Bundle (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: test
+    needs: [js-syntax, rust-test]
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -51,8 +69,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: rust-${{ matrix.os }}
 
       - name: Install dependencies
         run: npm ci
