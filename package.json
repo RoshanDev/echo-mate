@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "test:e2e:macos": "node tests/macos-smoke-runner.mjs"
+    "test:e2e:macos": "node tests/macos-smoke-runner.mjs",
+    "build:tauri": "npm exec --package @tauri-apps/cli@^2.11.0 -- tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0"
