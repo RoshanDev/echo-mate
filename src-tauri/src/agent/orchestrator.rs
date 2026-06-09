@@ -851,12 +851,20 @@ impl Orchestrator {
             }
         }
         if !recent_messages.is_empty() {
+            if let Some(latest) = recent_messages.last() {
+                block.push_str(&format!(
+                    "\n- 最近上下文时效：最后一条本地消息在{}；找话题时必须考虑这个时间差，不要把旧话题写成刚刚发生。",
+                    message_time_label(&latest.created_at)
+                ));
+            }
             block.push_str("\n- 最近上下文：");
             for message in recent_messages {
+                let time = message_time_label(&message.created_at);
                 block.push_str(&format!(
-                    "\n  - {} / {}：{}",
+                    "\n  - {} / {} / {}：{}",
                     message.role,
                     message.source,
+                    time,
                     truncate_for_prompt(&message.text, 100)
                 ));
             }
@@ -1514,6 +1522,36 @@ fn style_profile_prompt_guide(profile_json: &str) -> String {
         profile_json.trim().to_string()
     } else {
         guide
+    }
+}
+
+fn message_time_label(created_at: &str) -> String {
+    let Ok(parsed) = DateTime::parse_from_rfc3339(created_at) else {
+        return created_at.to_string();
+    };
+    let utc = parsed.with_timezone(&Utc);
+    let local = utc.with_timezone(&Local);
+    let age = Utc::now().signed_duration_since(utc);
+    format!(
+        "{}（{}）",
+        local.format("%m-%d %H:%M"),
+        human_age_label(age)
+    )
+}
+
+fn human_age_label(age: ChronoDuration) -> String {
+    if age.num_seconds() < 0 {
+        return "未来时间".to_string();
+    }
+    let minutes = age.num_minutes();
+    if minutes < 1 {
+        "刚刚".to_string()
+    } else if minutes < 60 {
+        format!("{minutes} 分钟前")
+    } else if minutes < 24 * 60 {
+        format!("{} 小时前", minutes / 60)
+    } else {
+        format!("{} 天前", minutes / (24 * 60))
     }
 }
 
