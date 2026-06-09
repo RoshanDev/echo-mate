@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "test:e2e:macos": "node tests/macos-smoke-runner.mjs"
+  },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0"
   }
