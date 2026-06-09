@@ -853,18 +853,18 @@ impl Orchestrator {
         if !recent_messages.is_empty() {
             if let Some(latest) = recent_messages.last() {
                 block.push_str(&format!(
-                    "\n- 最近上下文时效：最后一条本地消息在{}；找话题时必须考虑这个时间差，不要把旧话题写成刚刚发生。",
-                    message_time_label(&latest.created_at)
+                    "\n- 最近上下文时间说明：下列时间是 EchoMate 本地读取/保存时间，不等于聊天发送时间；截图/剪贴板来源尤其不能据此判断对方刚刚说过。最后一条本地保存记录：{}。",
+                    message_capture_label(latest)
                 ));
             }
             block.push_str("\n- 最近上下文：");
             for message in recent_messages {
-                let time = message_time_label(&message.created_at);
+                let capture = message_capture_label(&message);
                 block.push_str(&format!(
                     "\n  - {} / {} / {}：{}",
                     message.role,
                     message.source,
-                    time,
+                    capture,
                     truncate_for_prompt(&message.text, 100)
                 ));
             }
@@ -1525,7 +1525,18 @@ fn style_profile_prompt_guide(profile_json: &str) -> String {
     }
 }
 
-fn message_time_label(created_at: &str) -> String {
+fn message_capture_label(message: &crate::domain::MessageRecord) -> String {
+    let time = local_saved_time_label(&message.created_at);
+    match message.source.as_str() {
+        "notification" => format!("通知收到于{time}，可近似视为消息时间"),
+        "screenshot" => format!("截图摘要保存于{time}，不是聊天发送时间"),
+        "clipboard" => format!("剪贴板内容保存于{time}，不是聊天发送时间"),
+        "manual" => format!("用户采用回复保存于{time}，不是对方消息时间"),
+        source => format!("本地来源 {source} 保存于{time}，不一定是聊天发送时间"),
+    }
+}
+
+fn local_saved_time_label(created_at: &str) -> String {
     let Ok(parsed) = DateTime::parse_from_rfc3339(created_at) else {
         return created_at.to_string();
     };
