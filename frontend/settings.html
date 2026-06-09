@@ -51,6 +51,7 @@
 
     <div class="settings-section">
       <h3>隐私与安全</h3>
+      <div id="privacy-guide-box" class="permission-box"></div>
       <div class="setting-row">
         <label>严格隐私模式</label>
         <input type="checkbox" id="setting-strict-privacy" checked />
@@ -71,13 +72,18 @@
         <input type="checkbox" id="setting-sqlcipher" />
         <span class="hint">使用 SQLCipher 加密数据库</span>
       </div>
+      <div class="setting-row">
+        <label>调试正文日志</label>
+        <input type="checkbox" id="setting-debug-log-body" />
+        <span class="hint">默认关闭；开启前需确认隐私风险</span>
+      </div>
     </div>
 
     <div class="settings-section">
       <h3>联系人白名单</h3>
       <div class="contact-editor">
         <input type="hidden" id="contact-id" />
-        <input type="text" id="contact-alias" placeholder="联系人别名，例如 齐齐" />
+        <input type="text" id="contact-alias" placeholder="联系人别名，例如 联系人A" />
         <select id="contact-channel">
           <option value="wechat">微信</option>
           <option value="manual">手动</option>
@@ -89,6 +95,62 @@
         <button id="btn-save-contact" class="small-btn">保存联系人</button>
       </div>
       <div id="contacts-list" class="settings-list"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>联系人补充资料</h3>
+      <div class="manual-fact-editor">
+        <select id="fact-contact-select">
+          <option value="">选择联系人</option>
+        </select>
+        <textarea id="manual-fact-note" rows="3" placeholder="例如：联系人A 90 后，A 市人，在 B 市工作"></textarea>
+        <div class="manual-fact-actions">
+          <button id="btn-classify-facts" class="small-btn">归类资料</button>
+          <button id="btn-save-facts" class="small-btn" disabled>保存归类</button>
+        </div>
+      </div>
+      <div id="manual-fact-status" class="style-profile-status"></div>
+      <div id="manual-fact-preview" class="settings-list"></div>
+      <div id="manual-fact-list" class="settings-list"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>关系卡</h3>
+      <div class="setting-row">
+        <label>联系人</label>
+        <select id="workspace-contact-select">
+          <option value="">选择联系人</option>
+        </select>
+        <button id="btn-load-relationship" class="small-btn">查看</button>
+      </div>
+      <div id="relationship-card-box" class="settings-list"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>记忆候选收件箱</h3>
+      <div class="style-profile-actions">
+        <button id="btn-refresh-memory-inbox" class="small-btn">刷新候选</button>
+      </div>
+      <div id="memory-inbox-list" class="settings-list"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>提醒中心</h3>
+      <div class="style-profile-actions">
+        <button id="btn-refresh-reminders" class="small-btn">刷新提醒</button>
+      </div>
+      <div id="reminder-center-list" class="settings-list"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>数据审计</h3>
+      <div id="data-audit-box" class="permission-box"></div>
+      <div class="style-profile-actions">
+        <button id="btn-refresh-audit" class="small-btn">刷新审计</button>
+        <button id="btn-export-data" class="small-btn">导出快照</button>
+        <button id="btn-clear-logs" class="small-btn">清理日志</button>
+        <button id="btn-clear-all-data" class="small-btn danger">清空全部本地数据</button>
+      </div>
     </div>
 
     <div class="settings-section">

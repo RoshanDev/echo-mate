@@ -4,7 +4,16 @@ pub fn candidate_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["candidates", "action_card", "memory_candidates", "reminder_candidates", "context_summary"],
+        "required": [
+            "candidates",
+            "situation",
+            "action_card",
+            "source_summary",
+            "memory_candidates",
+            "reminder_candidates",
+            "context_summary",
+            "screenshot_analysis"
+        ],
         "properties": {
             "candidates": {
                 "type": "array",
@@ -13,13 +22,17 @@ pub fn candidate_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["text", "style_tags", "risk_flags", "reason"],
+                    "required": ["text", "intent_group", "style_tags", "risk_flags", "source_refs", "reason"],
                     "properties": {
                         "text": {
                             "type": "string",
                             "minLength": 2,
                             "maxLength": 120,
                             "description": "The candidate reply text in Chinese"
+                        },
+                        "intent_group": {
+                            "type": "string",
+                            "enum": ["稳妥", "轻松", "幽默", "温柔", "收束", "邀约", "支持"]
                         },
                         "style_tags": {
                             "type": "array",
@@ -35,11 +48,48 @@ pub fn candidate_schema() -> serde_json::Value {
                             },
                             "maxItems": 4
                         },
+                        "source_refs": {
+                            "type": "array",
+                            "items": { "type": "string", "maxLength": 80 },
+                            "maxItems": 5
+                        },
                         "reason": {
                             "type": "string",
                             "maxLength": 160,
                             "description": "Why this reply was chosen"
                         }
+                    }
+                }
+            },
+            "situation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["summary", "action_type", "staleness", "relationship_signal", "confidence"],
+                "properties": {
+                    "summary": { "type": "string", "maxLength": 220 },
+                    "action_type": {
+                        "type": "string",
+                        "enum": [
+                            "continue_chat",
+                            "wrap_up",
+                            "light_follow_up",
+                            "do_not_push",
+                            "safe_repair",
+                            "soft_invite_candidate"
+                        ]
+                    },
+                    "staleness": {
+                        "type": "string",
+                        "enum": ["fresh", "stale", "unknown", "visible_time_only", "inferred"]
+                    },
+                    "relationship_signal": {
+                        "type": "string",
+                        "maxLength": 160
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
                     }
                 }
             },
@@ -70,6 +120,10 @@ pub fn candidate_schema() -> serde_json::Value {
                     }
                 }
             },
+            "source_summary": {
+                "type": "string",
+                "maxLength": 260
+            },
             "memory_candidates": {
                 "type": "array",
                 "maxItems": 5,
@@ -78,13 +132,17 @@ pub fn candidate_schema() -> serde_json::Value {
                     "additionalProperties": false,
                     "required": [
                         "memory_type",
+                        "summary",
                         "value",
                         "source_kind",
                         "source_ref",
                         "source_excerpt",
+                        "source_quote",
+                        "reason",
                         "confidence",
                         "sensitivity",
-                        "expires_at"
+                        "expires_at",
+                        "ttl_days"
                     ],
                     "properties": {
                         "memory_type": {
@@ -96,6 +154,10 @@ pub fn candidate_schema() -> serde_json::Value {
                                 "stress_point",
                                 "relationship_milestone"
                             ]
+                        },
+                        "summary": {
+                            "type": "string",
+                            "maxLength": 180
                         },
                         "value": {
                             "type": "string",
@@ -114,6 +176,14 @@ pub fn candidate_schema() -> serde_json::Value {
                             "type": "string",
                             "maxLength": 180
                         },
+                        "source_quote": {
+                            "type": "string",
+                            "maxLength": 180
+                        },
+                        "reason": {
+                            "type": "string",
+                            "maxLength": 180
+                        },
                         "confidence": {
                             "type": "number",
                             "minimum": 0,
@@ -127,6 +197,11 @@ pub fn candidate_schema() -> serde_json::Value {
                             "type": "string",
                             "maxLength": 40,
                             "description": "RFC3339 time when this memory should expire, or empty string if long-lived"
+                        },
+                        "ttl_days": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "maximum": 3650
                         }
                     }
                 }
@@ -138,6 +213,7 @@ pub fn candidate_schema() -> serde_json::Value {
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
+                        "kind",
                         "memory_type",
                         "memory_value",
                         "source_kind",
@@ -147,10 +223,16 @@ pub fn candidate_schema() -> serde_json::Value {
                         "trigger_at",
                         "reason",
                         "suggested_follow_up",
+                        "source_context_id",
+                        "cooldown_key",
                         "confidence",
                         "sensitivity"
                     ],
                     "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["follow_up", "check_in", "important_date", "custom"]
+                        },
                         "memory_type": {
                             "type": "string",
                             "enum": [
@@ -195,6 +277,14 @@ pub fn candidate_schema() -> serde_json::Value {
                             "type": "string",
                             "maxLength": 120
                         },
+                        "source_context_id": {
+                            "type": "string",
+                            "maxLength": 120
+                        },
+                        "cooldown_key": {
+                            "type": "string",
+                            "maxLength": 120
+                        },
                         "confidence": {
                             "type": "number",
                             "minimum": 0,
@@ -225,6 +315,189 @@ pub fn candidate_schema() -> serde_json::Value {
                         "maxLength": 220
                     }
                 }
+            },
+            "screenshot_analysis": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "turns",
+                    "last_reply_target",
+                    "visible_time_label",
+                    "inferred_chat_time",
+                    "staleness",
+                    "warnings"
+                ],
+                "properties": {
+                    "turns": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "speaker",
+                                "text",
+                                "media_kind",
+                                "visible_time_label",
+                                "bbox",
+                                "confidence",
+                                "warnings"
+                            ],
+                            "properties": {
+                                "speaker": {
+                                    "type": "string",
+                                    "enum": ["me", "other", "system", "unknown"]
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "maxLength": 220
+                                },
+                                "media_kind": {
+                                    "type": "string",
+                                    "enum": ["text", "image", "emoji", "quote", "system", "unknown"]
+                                },
+                                "visible_time_label": {
+                                    "type": "string",
+                                    "maxLength": 80
+                                },
+                                "bbox": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["x", "y", "width", "height"],
+                                    "properties": {
+                                        "x": { "type": "number" },
+                                        "y": { "type": "number" },
+                                        "width": { "type": "number" },
+                                        "height": { "type": "number" }
+                                    }
+                                },
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                },
+                                "warnings": {
+                                    "type": "array",
+                                    "items": { "type": "string", "maxLength": 120 },
+                                    "maxItems": 5
+                                }
+                            }
+                        }
+                    },
+                    "last_reply_target": {
+                        "type": "string",
+                        "maxLength": 220
+                    },
+                    "visible_time_label": {
+                        "type": "string",
+                        "maxLength": 80
+                    },
+                    "inferred_chat_time": {
+                        "type": "string",
+                        "maxLength": 80
+                    },
+                    "staleness": {
+                        "type": "string",
+                        "enum": ["fresh", "stale", "unknown", "visible_time_only", "inferred"]
+                    },
+                    "warnings": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": 160 },
+                        "maxItems": 8
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// JSON Schema for classifying user-entered contact notes into structured facts.
+pub fn contact_fact_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["facts", "warnings", "usage_guidance"],
+        "properties": {
+            "facts": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "fact_type",
+                        "value",
+                        "normalized_value",
+                        "source_note",
+                        "fact_source",
+                        "sensitivity",
+                        "confidence",
+                        "ttl_days",
+                        "usage_policy"
+                    ],
+                    "properties": {
+                        "fact_type": {
+                            "type": "string",
+                            "enum": [
+                                "birth_year",
+                                "age_band",
+                                "hometown",
+                                "current_city",
+                                "work_city",
+                                "occupation",
+                                "preference",
+                                "boundary",
+                                "important_date",
+                                "temporary_state",
+                                "note"
+                            ]
+                        },
+                        "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                        },
+                        "normalized_value": {
+                            "type": "string",
+                            "maxLength": 120
+                        },
+                        "source_note": {
+                            "type": "string",
+                            "maxLength": 180
+                        },
+                        "fact_source": {
+                            "type": "string",
+                            "enum": ["manual"]
+                        },
+                        "sensitivity": {
+                            "type": "string",
+                            "enum": ["normal", "medium", "high", "forbidden"]
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                        },
+                        "ttl_days": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "maximum": 3650
+                        },
+                        "usage_policy": {
+                            "type": "string",
+                            "enum": ["contextual", "rare", "reminder_only", "never"]
+                        }
+                    }
+                }
+            },
+            "warnings": {
+                "type": "array",
+                "items": { "type": "string", "maxLength": 160 },
+                "maxItems": 5
+            },
+            "usage_guidance": {
+                "type": "string",
+                "maxLength": 260
             }
         }
     })
@@ -284,5 +557,15 @@ mod tests {
         }
 
         assert_required_matches_properties(&candidate_schema());
+    }
+
+    #[test]
+    fn contact_fact_schema_has_strict_top_level() {
+        let schema = contact_fact_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        let required = schema["required"].as_array().expect("required array");
+        assert!(required.iter().any(|value| value == "facts"));
+        assert!(required.iter().any(|value| value == "warnings"));
+        assert!(required.iter().any(|value| value == "usage_guidance"));
     }
 }

@@ -36,6 +36,7 @@
         <option value="">未选择联系人</option>
       </select>
       <span id="provider-badge"></span>
+      <input id="topic-hint-input" type="text" maxlength="80" placeholder="找话题参考（可空）" />
       <button id="btn-topic-generate">💬 找话题</button>
       <button id="btn-screenshot-generate">▣ 框选截图</button>
       <button id="btn-test-generate">⚡ 生成回复</button>
@@ -57,6 +58,11 @@
       <section class="insight-section" id="context-section">
         <div class="section-title">上下文来源</div>
         <div id="context-card" class="insight-card"></div>
+      </section>
+
+      <section class="insight-section" id="screenshot-analysis-section">
+        <div class="section-title">截图理解</div>
+        <div id="screenshot-analysis-card" class="insight-card"></div>
       </section>
 
       <section class="insight-section" id="memory-section">

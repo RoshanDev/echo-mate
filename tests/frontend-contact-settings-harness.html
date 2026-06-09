@@ -31,7 +31,23 @@
     <input id="contact-allowlisted" type="checkbox" checked>
     <button id="btn-save-contact">保存联系人</button>
     <div id="contacts-list"></div>
+    <select id="fact-contact-select"></select>
+    <textarea id="manual-fact-note"></textarea>
+    <button id="btn-classify-facts">归类资料</button>
+    <button id="btn-save-facts" disabled>保存归类</button>
+    <div id="manual-fact-status"></div>
+    <div id="manual-fact-preview"></div>
+    <div id="manual-fact-list"></div>
     <div id="permission-status"></div>
+    <div id="style-profile-summary"></div>
+    <div id="style-profile-samples"></div>
+    <div id="style-profile-avg"></div>
+    <div id="style-profile-updated"></div>
+    <div id="style-profile-tags"></div>
+    <div id="style-profile-rules"></div>
+    <div id="style-profile-status"></div>
+    <button id="btn-refresh-style-profile">刷新画像</button>
+    <button id="btn-reset-style-profile">重置画像</button>
 
     <button id="btn-save-settings">保存设置</button>
     <button id="btn-reset-settings">恢复默认</button>
@@ -43,7 +59,7 @@
     const calls = [];
     let contacts = [{
       id: 'contact-1',
-      alias: '齐齐',
+      alias: '测试联系人A',
       channel: 'wechat',
       is_allowlisted: true,
       created_at: '2026-06-08T10:00:00Z',
@@ -89,6 +105,48 @@
           return Promise.resolve(next);
         }
         if (command === 'clear_contact_context') return Promise.resolve({ ok: true });
+        if (command === 'classify_contact_facts') {
+          return Promise.resolve({
+            facts: [
+              {
+                fact_type: 'age_band',
+                value: '90 后',
+                normalized_value: '90s',
+                source_note: args.note,
+                fact_source: 'manual',
+                sensitivity: 'normal',
+                confidence: 0.9,
+                ttl_days: null,
+                usage_policy: 'contextual',
+              },
+              {
+                fact_type: 'hometown',
+                value: 'A 市',
+                normalized_value: 'A 市',
+                source_note: args.note,
+                fact_source: 'manual',
+                sensitivity: 'normal',
+                confidence: 0.86,
+                ttl_days: null,
+                usage_policy: 'contextual',
+              },
+            ],
+            warnings: [],
+            usage_guidance: '只在相关场景使用。',
+          });
+        }
+        if (command === 'save_contact_facts') {
+          return Promise.resolve(args.facts.map((fact, index) => ({
+            id: 'fact-' + index,
+            contact_id: args.contactId,
+            ...fact,
+            created_at: '2026-06-08T10:00:00Z',
+            updated_at: '2026-06-08T10:00:00Z',
+            last_used_at: '',
+          })));
+        }
+        if (command === 'list_contact_facts') return Promise.resolve([]);
+        if (command === 'delete_contact_fact') return Promise.resolve({ ok: true });
         if (command === 'delete_contact') {
           contacts = contacts.filter((contact) => contact.id !== args.id);
           return Promise.resolve({ ok: true });
@@ -120,6 +178,13 @@
         if (command === 'save_settings' || command === 'reset_settings' || command === 'show_popup') {
           return Promise.resolve({ ok: true });
         }
+        if (
+          command === 'get_style_profile' ||
+          command === 'refresh_style_profile' ||
+          command === 'reset_style_profile'
+        ) {
+          return Promise.resolve(null);
+        }
         return Promise.resolve();
       },
     };
@@ -133,16 +198,26 @@
     }
     try {
       await sleep(100);
-      assert(document.body.textContent.includes('齐齐'), 'existing contact not rendered');
+      assert(document.body.textContent.includes('测试联系人A'), 'existing contact not rendered');
       assert(document.body.textContent.includes('不会自动发送'), 'permission boundary missing');
       assert(document.body.textContent.includes('macOS helper'), 'macOS helper snapshot missing');
 
-      document.getElementById('contact-alias').value = '小周';
+      document.getElementById('contact-alias').value = '测试联系人B';
       document.getElementById('contact-channel').value = 'wechat';
       document.getElementById('contact-allowlisted').checked = true;
       document.getElementById('btn-save-contact').click();
       await sleep(50);
-      assert(document.body.textContent.includes('小周'), 'new contact not saved');
+      assert(document.body.textContent.includes('测试联系人B'), 'new contact not saved');
+
+      document.getElementById('fact-contact-select').value = 'contact-1';
+      document.getElementById('fact-contact-select').dispatchEvent(new Event('change'));
+      document.getElementById('manual-fact-note').value = '联系人A 90 后，A 市人，在 B 市工作';
+      document.getElementById('btn-classify-facts').click();
+      await sleep(50);
+      assert(document.body.textContent.includes('年龄段'), 'manual fact preview missing age band');
+      document.getElementById('btn-save-facts').click();
+      await sleep(50);
+      assert(calls.some((call) => call.command === 'save_contact_facts'), 'save facts not invoked');
 
       [...document.querySelectorAll('button')].find((button) => button.textContent === '清空上下文').click();
       await sleep(50);

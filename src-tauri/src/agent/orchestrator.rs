@@ -2,14 +2,18 @@ use crate::agent::parser::OutputParser;
 use crate::agent::schema;
 use crate::agent::PromptComposer;
 use crate::domain::{
-    Candidate, CandidateEnvelope, ContactInput, ContactRecord, ContextPolicy,
-    ContextSummaryCandidate, ContextSummaryRecord, NextAction, PermissionStatus, PlatformSignal,
-    PlatformSignalResult, StyleProfileRecord,
+    BoundingBox, Candidate, CandidateEnvelope, ContactFactCandidate, ContactFactClassification,
+    ContactFactRecord, ContactInput, ContactRecord, ContextPolicy, ContextSummaryCandidate,
+    ContextSummaryRecord, DataAuditReport, MemoryCandidateRecord, MemoryItemRecord, NextAction,
+    PermissionStatus, PlatformSignal, PlatformSignalResult, PrivacyGuideStatus, RelationshipCard,
+    ReminderCenterItem, ScreenshotAnalysis, ScreenshotTurn, SourceCard, SourceContextRecord,
+    StyleProfileRecord, SuggestionRunRecord,
 };
 use crate::platform::clipboard::{ClipboardImage, ClipboardManager};
 use crate::platform::hotkey::HotkeyManager;
 use crate::platform::input::InputSimulator;
 use crate::platform::screenshot::ScreenCapture;
+use crate::platform::vision_ocr::{self, OcrLine};
 use crate::provider::claude::ClaudeProvider;
 use crate::provider::codex::CodexProvider;
 use crate::store::memory_repo::MemoryRepository;
@@ -36,6 +40,8 @@ const RECENT_CONTACT_COOLDOWN_MINUTES: i64 = 20;
 const RECENT_CONTACT_SNOOZE_MINUTES: i64 = 30;
 const RECENT_CONTEXT_LIMIT: usize = 8;
 const CONTACT_MEMORY_LIMIT: usize = 8;
+const CONTACT_FACT_LIMIT: usize = 8;
+const SOURCE_CARD_LIMIT: usize = 8;
 
 fn default_context_retention_days() -> i64 {
     30
@@ -66,6 +72,10 @@ pub struct AppConfig {
     pub macos_context_helper_enabled: bool,
     #[serde(default)]
     pub macos_accessibility_enabled: bool,
+    #[serde(default)]
+    pub privacy_onboarding_completed: bool,
+    #[serde(default)]
+    pub debug_log_body_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -88,6 +98,8 @@ impl Default for AppConfig {
             windows_notification_helper_enabled: false,
             macos_context_helper_enabled: false,
             macos_accessibility_enabled: false,
+            privacy_onboarding_completed: false,
+            debug_log_body_enabled: false,
         }
     }
 }
@@ -141,6 +153,9 @@ impl Orchestrator {
     }
 
     fn config_path() -> PathBuf {
+        if e2e_mock_provider_enabled() {
+            return e2e_profile_dir().join("config.json");
+        }
         // On Windows: %APPDATA%\EchoMate\config.json
         // On Linux/macOS: ~/.echomate/config.json
         if let Ok(appdata) = std::env::var("APPDATA") {
@@ -215,8 +230,13 @@ impl Orchestrator {
         self.generate_with_guard(app, input).await
     }
 
-    pub async fn trigger_topics(&self, app: &AppHandle) -> Result<CandidateEnvelope, String> {
-        self.generate_with_guard(app, GenerationInput::Topic).await
+    pub async fn trigger_topics(
+        &self,
+        app: &AppHandle,
+        topic_hint: Option<String>,
+    ) -> Result<CandidateEnvelope, String> {
+        self.generate_with_guard(app, GenerationInput::Topic(topic_hint))
+            .await
     }
 
     pub async fn trigger_from_screenshot(
@@ -296,7 +316,9 @@ impl Orchestrator {
                 self.generate_from_screenshot_input(app, screenshot, input)
                     .await
             }
-            GenerationInput::Topic => self.generate_from_topic(app, input).await,
+            GenerationInput::Topic(topic_hint) => {
+                self.generate_from_topic(app, input, topic_hint).await
+            }
         }
     }
 
@@ -339,11 +361,21 @@ impl Orchestrator {
         match result {
             Ok(envelope) => {
                 let envelope = self.apply_context_policy(envelope, &generation_context);
-                let context_record = self.persist_generation_artifacts(
+                let persisted = self.persist_generation_artifacts(
                     &envelope,
                     "clipboard",
+                    &config.primary_provider,
                     &generation_context,
                     Some(&text),
+                    None,
+                );
+                let source_cards = self.source_cards_for_view(
+                    "clipboard",
+                    &config.primary_provider,
+                    &generation_context,
+                    persisted.source_context.as_ref(),
+                    Some(&text),
+                    &envelope.context_summary.summary,
                 );
                 self.emit_candidates_ready(
                     app,
@@ -351,7 +383,9 @@ impl Orchestrator {
                     &config.primary_provider,
                     "standard",
                     &generation_context.policy,
-                    context_record.as_ref(),
+                    persisted.context_record.as_ref(),
+                    &source_cards,
+                    persisted.suggestion_run.as_ref(),
                 );
                 self.remember_generation_input(input);
                 Ok(envelope)
@@ -380,10 +414,12 @@ impl Orchestrator {
 
         let config = self.config.lock().unwrap().clone();
         let generation_context = self.generation_context(&config);
+        let local_screenshot_analysis = analyze_screenshot_locally(&screenshot);
         let system_prompt = self.prompt_composer.system_prompt();
         let task_prompt = self.prompt_composer.screenshot_task_prompt(
             screenshot.width,
             screenshot.height,
+            &local_screenshot_analysis,
             &generation_context.context_block,
             &config.tone,
             &config.length,
@@ -402,12 +438,42 @@ impl Orchestrator {
 
         match result {
             Ok((envelope, provider)) => {
-                let envelope = self.apply_context_policy(envelope, &generation_context);
-                let context_record = self.persist_generation_artifacts(
+                let mut envelope = self.apply_context_policy(envelope, &generation_context);
+                envelope.screenshot_analysis = merge_screenshot_analysis(
+                    local_screenshot_analysis,
+                    envelope.screenshot_analysis,
+                );
+                let persisted = self.persist_generation_artifacts(
                     &envelope,
                     "screenshot",
+                    &provider,
                     &generation_context,
                     None,
+                    Some(&envelope.screenshot_analysis),
+                );
+                if let (Some(contact), Some(source_context)) = (
+                    generation_context.contact.as_ref(),
+                    persisted.source_context.as_ref(),
+                ) {
+                    if let Err(e) = self.memory_repo.insert_screenshot_analysis(
+                        &contact.id,
+                        Some(&source_context.id),
+                        &screenshot.path.to_string_lossy(),
+                        screenshot.width,
+                        screenshot.height,
+                        "apple_vision_or_provider",
+                        &envelope.screenshot_analysis,
+                    ) {
+                        tracing::warn!("Failed to persist screenshot analysis: {e}");
+                    }
+                }
+                let source_cards = self.source_cards_for_view(
+                    "screenshot",
+                    &provider,
+                    &generation_context,
+                    persisted.source_context.as_ref(),
+                    None,
+                    &envelope.context_summary.summary,
                 );
                 self.emit_candidates_ready(
                     app,
@@ -415,7 +481,9 @@ impl Orchestrator {
                     &provider,
                     "screenshot",
                     &generation_context.policy,
-                    context_record.as_ref(),
+                    persisted.context_record.as_ref(),
+                    &source_cards,
+                    persisted.suggestion_run.as_ref(),
                 );
                 self.remember_generation_input(input);
                 Ok(envelope)
@@ -431,6 +499,7 @@ impl Orchestrator {
         &self,
         app: &AppHandle,
         input: GenerationInput,
+        topic_hint: Option<String>,
     ) -> Result<CandidateEnvelope, String> {
         tracing::info!("Generating proactive topic starters");
         self.emit_generation_started(app, "topic", None);
@@ -444,6 +513,7 @@ impl Orchestrator {
             &config.length,
             config.emoji_level,
             config.humor_level,
+            topic_hint.as_deref(),
         );
         let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, task_prompt);
         let (schema_path, schema_json) = self.write_schema().await?;
@@ -458,11 +528,21 @@ impl Orchestrator {
         match result {
             Ok(envelope) => {
                 let envelope = self.apply_context_policy(envelope, &generation_context);
-                let context_record = self.persist_generation_artifacts(
+                let persisted = self.persist_generation_artifacts(
                     &envelope,
                     "topic",
+                    &config.primary_provider,
                     &generation_context,
                     None,
+                    None,
+                );
+                let source_cards = self.source_cards_for_view(
+                    "topic",
+                    &config.primary_provider,
+                    &generation_context,
+                    persisted.source_context.as_ref(),
+                    topic_hint.as_deref(),
+                    &envelope.context_summary.summary,
                 );
                 self.emit_candidates_ready(
                     app,
@@ -470,7 +550,9 @@ impl Orchestrator {
                     &config.primary_provider,
                     "topic",
                     &generation_context.policy,
-                    context_record.as_ref(),
+                    persisted.context_record.as_ref(),
+                    &source_cards,
+                    persisted.suggestion_run.as_ref(),
                 );
                 self.remember_generation_input(input);
                 Ok(envelope)
@@ -501,6 +583,21 @@ impl Orchestrator {
         Ok((schema_path, schema_json))
     }
 
+    async fn write_contact_fact_schema(&self) -> Result<(PathBuf, serde_json::Value), String> {
+        tokio::fs::create_dir_all(&self.schema_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let schema_path = self.schema_dir.join("contact_facts.schema.json");
+        let schema_json = schema::contact_fact_schema();
+        tokio::fs::write(
+            &schema_path,
+            serde_json::to_string_pretty(&schema_json).unwrap(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok((schema_path, schema_json))
+    }
+
     fn emit_candidates_ready(
         &self,
         app: &AppHandle,
@@ -509,18 +606,25 @@ impl Orchestrator {
         mode: &str,
         policy: &ContextPolicy,
         context_record: Option<&ContextSummaryRecord>,
+        source_cards: &[SourceCard],
+        suggestion_run: Option<&SuggestionRunRecord>,
     ) {
         if let Err(errs) = self.parser.validate(envelope) {
             tracing::warn!("Validation warnings: {:?}", errs);
         }
         let payload = serde_json::json!({
             "candidates": &envelope.candidates,
+            "situation": &envelope.situation,
             "action_card": &envelope.action_card,
+            "source_summary": &envelope.source_summary,
             "memory_candidates": &envelope.memory_candidates,
             "reminder_candidates": &envelope.reminder_candidates,
             "context_summary": &envelope.context_summary,
+            "screenshot_analysis": &envelope.screenshot_analysis,
             "context_policy": policy,
             "context_record": context_record,
+            "source_cards": source_cards,
+            "suggestion_run": suggestion_run,
             "provider": provider,
             "mode": mode,
         });
@@ -788,11 +892,12 @@ impl Orchestrator {
             can_save_context,
             global_privacy_mode: config.global_privacy_mode,
         };
-        let context_block = self.build_context_block(contact.as_ref(), &policy);
+        let (context_block, source_cards) = self.build_context_block(contact.as_ref(), &policy);
         GenerationContext {
             contact,
             policy,
             context_block,
+            source_cards,
         }
     }
 
@@ -800,17 +905,20 @@ impl Orchestrator {
         &self,
         contact: Option<&ContactRecord>,
         policy: &ContextPolicy,
-    ) -> String {
+    ) -> (String, Vec<SourceCard>) {
         if !policy.can_save_context {
-            return format!(
+            return (
+                format!(
                 "- {reason}\n- 必须让 memory_candidates 和 reminder_candidates 返回空数组。\n- 可以继续生成 5 条候选回复，但不要声称已保存任何信息。",
                 reason = policy.reason
+                ),
+                Vec::new(),
             );
         }
 
         let contact = match contact {
             Some(contact) => contact,
-            None => return policy.reason.clone(),
+            None => return (policy.reason.clone(), Vec::new()),
         };
         let recent_messages = self
             .memory_repo
@@ -826,10 +934,24 @@ impl Orchestrator {
                 tracing::warn!("Failed to load contact memories: {e}");
                 Vec::new()
             });
+        let contact_facts = self
+            .memory_repo
+            .prompt_contact_facts(&contact.id, CONTACT_FACT_LIMIT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load contact facts: {e}");
+                Vec::new()
+            });
+        let mut source_cards = self
+            .memory_repo
+            .recent_source_cards(&contact.id, SOURCE_CARD_LIMIT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load source cards: {e}");
+                Vec::new()
+            });
         let style_profile = self.memory_repo.style_profile().ok().flatten();
 
         let mut block = format!(
-            "- 当前联系人：{} / {}\n- 白名单：已启用\n- 保存策略：只保存用户可见来源，用户可删除；记忆/提醒仍需用户确认。",
+            "- 当前联系人：{} / {}\n- 白名单：已启用\n- 保存策略：只保存用户可见来源，用户可删除；记忆/提醒仍需用户确认。\n- 来源合同：只能使用当前输入和下面列出的本地上下文；不得使用 provider 自带示例、测试语料或未列出的背景。",
             contact.alias, contact.channel
         );
         if let Some(profile) = style_profile {
@@ -839,9 +961,33 @@ impl Orchestrator {
                 truncate_for_prompt(&guide, 560)
             ));
         }
+        if !contact_facts.is_empty() {
+            block.push_str("\n- 用户手动补充资料（不是聊天记录，只能在相关场景谨慎使用；引用时标明“用户手动补充”）：");
+            for fact in &contact_facts {
+                source_cards.push(contact_fact_source_card(fact));
+                block.push_str(&format!(
+                    "\n  - [{}] {}（来源：用户手动补充；敏感度：{}；使用策略：{}）",
+                    fact_type_label(&fact.fact_type),
+                    truncate_for_prompt(&fact.value, 80),
+                    fact.sensitivity,
+                    fact.usage_policy
+                ));
+            }
+        }
         if !memories.is_empty() {
             block.push_str("\n- 已确认联系人记忆：");
             for memory in memories {
+                source_cards.push(SourceCard {
+                    id: memory.id.clone(),
+                    source_kind: "memory".to_string(),
+                    title: format!("已批准记忆：{}", memory.memory_type),
+                    detail: truncate_for_prompt(&memory.value, 100),
+                    fact_source: non_empty_signal(&memory.source_kind, "memory"),
+                    captured_at: memory.created_at.clone(),
+                    visible_message_time: String::new(),
+                    inferred_chat_time: String::new(),
+                    source_confidence: memory.confidence,
+                });
                 block.push_str(&format!(
                     "\n  - [{}] {}（来源：{}）",
                     memory.memory_type,
@@ -869,7 +1015,7 @@ impl Orchestrator {
                 ));
             }
         }
-        block
+        (block, source_cards)
     }
 
     fn apply_context_policy(
@@ -904,17 +1050,26 @@ impl Orchestrator {
         &self,
         envelope: &CandidateEnvelope,
         fallback_source_kind: &str,
+        provider: &str,
         context: &GenerationContext,
         incoming_text: Option<&str>,
-    ) -> Option<ContextSummaryRecord> {
+        screenshot_analysis: Option<&ScreenshotAnalysis>,
+    ) -> PersistedGenerationArtifacts {
+        let empty = || PersistedGenerationArtifacts {
+            context_record: None,
+            source_context: None,
+            suggestion_run: None,
+        };
         if e2e_mock_provider_enabled() || has_e2e_mock_artifacts(envelope) {
             tracing::warn!("Skipped persistence for e2e mock generation artifacts");
-            return None;
+            return empty();
         }
         if !context.policy.can_save_context {
-            return None;
+            return empty();
         }
-        let contact = context.contact.as_ref()?;
+        let Some(contact) = context.contact.as_ref() else {
+            return empty();
+        };
         let config = self.config.lock().unwrap().clone();
         if let Err(e) = self
             .memory_repo
@@ -923,13 +1078,57 @@ impl Orchestrator {
             tracing::warn!("Failed to apply retention: {e}");
         }
 
+        let source_excerpt = incoming_text
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(&envelope.context_summary.summary);
+        let source_context = match self.memory_repo.insert_source_context(
+            &contact.id,
+            provider,
+            fallback_source_kind,
+            fallback_source_kind,
+            input_source_title(fallback_source_kind),
+            source_excerpt,
+            None,
+            screenshot_analysis.and_then(|analysis| {
+                (!analysis.visible_time_label.trim().is_empty())
+                    .then_some(analysis.visible_time_label.as_str())
+            }),
+            screenshot_analysis
+                .map(|analysis| analysis.inferred_chat_time.as_str())
+                .or_else(|| inferred_chat_time_label(fallback_source_kind)),
+            screenshot_analysis
+                .map(screenshot_source_confidence)
+                .unwrap_or_else(|| input_source_confidence(fallback_source_kind)),
+            &screenshot_source_metadata(screenshot_analysis),
+        ) {
+            Ok(record) => Some(record),
+            Err(e) => {
+                tracing::warn!("Failed to persist source context: {e}");
+                None
+            }
+        };
+
         if let Some(text) = incoming_text.filter(|text| !text.trim().is_empty()) {
-            if let Err(e) = self.memory_repo.append_message(
+            if let Err(e) = self.memory_repo.append_message_with_source_context(
                 &contact.id,
                 "other",
                 text,
                 fallback_source_kind,
                 false,
+                source_context.as_ref().map(|record| record.id.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.captured_at.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.visible_message_time.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.inferred_chat_time.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.source_confidence)
+                    .unwrap_or_default(),
             ) {
                 tracing::warn!("Failed to append inbound message: {e}");
             }
@@ -940,29 +1139,148 @@ impl Orchestrator {
             summary.source_kind = fallback_source_kind.to_string();
         }
         if summary.summary.trim().is_empty() {
-            return None;
+            return PersistedGenerationArtifacts {
+                context_record: None,
+                source_context,
+                suggestion_run: None,
+            };
         }
         if incoming_text.is_none() && !matches!(fallback_source_kind, "topic") {
-            if let Err(e) = self.memory_repo.append_message(
+            if let Err(e) = self.memory_repo.append_message_with_source_context(
                 &contact.id,
                 "other",
                 &summary.summary,
                 fallback_source_kind,
                 false,
+                source_context.as_ref().map(|record| record.id.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.captured_at.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.visible_message_time.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.inferred_chat_time.as_str()),
+                source_context
+                    .as_ref()
+                    .map(|record| record.source_confidence)
+                    .unwrap_or_default(),
             ) {
                 tracing::warn!("Failed to append summarized message: {e}");
             }
         }
-        match self
-            .memory_repo
-            .insert_context_summary_for_contact(Some(&contact.id), &summary)
-        {
+        let context_record = match self.memory_repo.insert_context_summary_with_source(
+            Some(&contact.id),
+            &summary,
+            source_context.as_ref().map(|record| record.id.as_str()),
+            source_context
+                .as_ref()
+                .map(|record| record.captured_at.as_str()),
+            source_context
+                .as_ref()
+                .map(|record| record.visible_message_time.as_str()),
+            source_context
+                .as_ref()
+                .map(|record| record.inferred_chat_time.as_str()),
+            source_context
+                .as_ref()
+                .map(|record| record.source_confidence)
+                .unwrap_or_default(),
+        ) {
             Ok(record) => Some(record),
             Err(e) => {
                 tracing::warn!("Failed to persist context summary: {e}");
                 None
             }
+        };
+
+        let mut persisted_cards = context.source_cards.clone();
+        if let Some(record) = source_context.as_ref() {
+            persisted_cards.push(source_context_to_card(record));
         }
+        let suggestion_run = match self.memory_repo.record_suggestion_run(
+            &contact.id,
+            provider,
+            fallback_source_kind,
+            source_context.as_ref().map(|record| record.id.as_str()),
+            &persisted_cards,
+            &summary.summary,
+        ) {
+            Ok(run) => Some(run),
+            Err(e) => {
+                tracing::warn!("Failed to persist suggestion run: {e}");
+                None
+            }
+        };
+        if let Some(run) = suggestion_run.as_ref() {
+            if let Err(e) = self.memory_repo.record_memory_candidates_for_run(
+                &contact.id,
+                &run.id,
+                source_context.as_ref().map(|record| record.id.as_str()),
+                &envelope.memory_candidates,
+            ) {
+                tracing::warn!("Failed to persist memory candidates: {e}");
+            }
+        }
+
+        PersistedGenerationArtifacts {
+            context_record,
+            source_context,
+            suggestion_run,
+        }
+    }
+
+    fn source_cards_for_view(
+        &self,
+        input_kind: &str,
+        provider: &str,
+        context: &GenerationContext,
+        source_context: Option<&SourceContextRecord>,
+        incoming_text: Option<&str>,
+        summary: &str,
+    ) -> Vec<SourceCard> {
+        let detail = incoming_text
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(summary)
+            .trim();
+        let current = source_context
+            .map(source_context_to_card)
+            .unwrap_or_else(|| SourceCard {
+                id: format!("current-{input_kind}"),
+                source_kind: input_kind.to_string(),
+                title: input_source_title(input_kind).to_string(),
+                detail: truncate_for_prompt(detail, 220),
+                fact_source: input_kind.to_string(),
+                captured_at: Utc::now().to_rfc3339(),
+                visible_message_time: String::new(),
+                inferred_chat_time: inferred_chat_time_label(input_kind)
+                    .unwrap_or_default()
+                    .to_string(),
+                source_confidence: input_source_confidence(input_kind),
+            });
+
+        let mut cards = vec![current];
+        for card in &context.source_cards {
+            if cards.iter().any(|existing| existing.id == card.id) {
+                continue;
+            }
+            cards.push(card.clone());
+        }
+        if !provider.trim().is_empty() {
+            cards.push(SourceCard {
+                id: format!("provider-{provider}"),
+                source_kind: "provider_run".to_string(),
+                title: "本次 Provider 调用".to_string(),
+                detail: format!("Provider：{provider}；只允许使用本次 prompt 列出的来源。"),
+                fact_source: "provider".to_string(),
+                captured_at: Utc::now().to_rfc3339(),
+                visible_message_time: String::new(),
+                inferred_chat_time: String::new(),
+                source_confidence: 1.0,
+            });
+        }
+        cards
     }
 
     pub fn save_memory_candidate(
@@ -981,6 +1299,28 @@ impl Orchestrator {
             .ok_or_else(|| "联系人不在白名单或隐私模式已开启，不能保存这条记忆。".to_string())?;
         self.memory_repo
             .save_memory_candidate_for_contact(Some(contact_id), &candidate)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn list_memory_candidate_inbox(
+        &self,
+        contact_id: Option<String>,
+    ) -> Result<Vec<MemoryCandidateRecord>, String> {
+        let contact_id = self.resolve_contact_id_for_view(contact_id)?;
+        self.memory_repo
+            .list_memory_candidates(&contact_id, Some("candidate"), 50)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn confirm_memory_candidate_record(&self, id: &str) -> Result<MemoryItemRecord, String> {
+        self.memory_repo
+            .confirm_memory_candidate(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn ignore_memory_candidate_record(&self, id: &str) -> Result<(), String> {
+        self.memory_repo
+            .ignore_memory_candidate_record(id)
             .map_err(|e| e.to_string())
     }
 
@@ -1008,6 +1348,54 @@ impl Orchestrator {
             tracing::warn!("Failed to process due reminders after create: {e}");
         }
         Ok(detail)
+    }
+
+    pub fn list_reminders(
+        &self,
+        contact_id: Option<String>,
+    ) -> Result<Vec<ReminderCenterItem>, String> {
+        let resolved = contact_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let active = self.config.lock().unwrap().active_contact_id.clone();
+                (!active.trim().is_empty()).then_some(active)
+            });
+        self.memory_repo
+            .list_reminders(resolved.as_deref(), false, 100)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn complete_reminder(&self, id: &str) -> Result<(), String> {
+        self.memory_repo
+            .complete_reminder(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn snooze_reminder_minutes(&self, id: &str, minutes: i64) -> Result<(), String> {
+        let minutes = minutes.clamp(5, 60 * 24 * 30);
+        self.memory_repo
+            .snooze_reminder(id, Utc::now() + ChronoDuration::minutes(minutes))
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn mute_reminders(
+        &self,
+        contact_id: Option<String>,
+        kind: Option<String>,
+        hours: i64,
+    ) -> Result<(), String> {
+        self.memory_repo
+            .mute_reminders(
+                contact_id
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty()),
+                kind.as_deref().filter(|value| !value.trim().is_empty()),
+                hours,
+                "用户在提醒中心静默",
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn delete_memory(&self, id: &str) -> Result<(), String> {
@@ -1098,6 +1486,156 @@ impl Orchestrator {
             .map_err(|e| e.to_string())
     }
 
+    pub async fn classify_contact_facts(
+        &self,
+        contact_id: &str,
+        note: &str,
+    ) -> Result<ContactFactClassification, String> {
+        let note = note.trim();
+        if note.is_empty() {
+            return Err("请先输入要补充的联系人资料。".to_string());
+        }
+        let config = self.config.lock().unwrap().clone();
+        if config.global_privacy_mode {
+            return Err("全局隐私模式已开启，不能调用 Provider 归类联系人资料。".to_string());
+        }
+        let contact = self
+            .memory_repo
+            .get_contact(contact_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "联系人不存在，不能补充资料。".to_string())?;
+        if !contact.is_allowlisted {
+            return Err("联系人未启用白名单，不能保存或归类补充资料。".to_string());
+        }
+
+        let prompt = self
+            .prompt_composer
+            .contact_fact_classification_prompt(&contact.alias, note);
+        let (schema_path, schema_json) = self.write_contact_fact_schema().await?;
+        let mut classification = match config.primary_provider.as_str() {
+            "codex" => {
+                let provider = CodexProvider::new().with_timeout(config.timeout_seconds);
+                provider
+                    .classify_contact_facts(&prompt, &schema_path)
+                    .await
+                    .map_err(|e| Self::friendly_provider_error("Codex", e))?
+            }
+            "claude" => {
+                let provider = ClaudeProvider::new().with_timeout(config.timeout_seconds);
+                provider
+                    .classify_contact_facts(&prompt, &schema_json)
+                    .await
+                    .map_err(|e| Self::friendly_provider_error("Claude", e))?
+            }
+            _ => return Err(format!("Unknown provider: {}", config.primary_provider)),
+        };
+        normalize_manual_fact_classification(&mut classification, note);
+        Ok(classification)
+    }
+
+    pub fn save_contact_facts(
+        &self,
+        contact_id: &str,
+        mut facts: Vec<ContactFactCandidate>,
+    ) -> Result<Vec<ContactFactRecord>, String> {
+        let config = self.config.lock().unwrap().clone();
+        if config.global_privacy_mode {
+            return Err("全局隐私模式已开启，不能保存联系人补充资料。".to_string());
+        }
+        let contact = self
+            .memory_repo
+            .get_contact(contact_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "联系人不存在，不能保存补充资料。".to_string())?;
+        if !contact.is_allowlisted {
+            return Err("联系人未启用白名单，不能保存补充资料。".to_string());
+        }
+        for fact in &mut facts {
+            fact.fact_source = "manual".to_string();
+            if fact.source_note.trim().is_empty() {
+                fact.source_note = "用户手动补充".to_string();
+            }
+        }
+        self.memory_repo
+            .save_contact_facts(contact_id, &facts)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn list_contact_facts(&self, contact_id: &str) -> Result<Vec<ContactFactRecord>, String> {
+        self.memory_repo
+            .list_contact_facts(contact_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn relationship_card(
+        &self,
+        contact_id: Option<String>,
+    ) -> Result<RelationshipCard, String> {
+        let contact_id = self.resolve_contact_id_for_view(contact_id)?;
+        self.memory_repo
+            .relationship_card(&contact_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn data_audit_report(&self) -> Result<DataAuditReport, String> {
+        let config = self.config.lock().unwrap().clone();
+        self.memory_repo
+            .data_audit_report(&config.active_contact_id, config.context_retention_days)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn export_data_snapshot(&self) -> Result<serde_json::Value, String> {
+        self.memory_repo
+            .export_data_snapshot()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn clear_all_data(&self) -> Result<(), String> {
+        self.clear_last_generation_view();
+        self.memory_repo.clear_all_data().map_err(|e| e.to_string())
+    }
+
+    pub fn clear_logs(&self) -> Result<(), String> {
+        let dir = log_dir_path();
+        if !dir.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_file() {
+                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn privacy_guide_status(&self) -> PrivacyGuideStatus {
+        let config = self.config.lock().unwrap().clone();
+        PrivacyGuideStatus {
+            onboarding_completed: config.privacy_onboarding_completed,
+            strict_privacy: config.strict_privacy,
+            global_privacy_mode: config.global_privacy_mode,
+            debug_log_body_enabled: config.debug_log_body_enabled,
+            log_path: log_dir_path().display().to_string(),
+            data_path: self.memory_repo.db_path().display().to_string(),
+            shell_execute_exposed_to_frontend: false,
+        }
+    }
+
+    pub fn acknowledge_privacy_guide(&self) {
+        {
+            let mut config = self.config.lock().unwrap();
+            config.privacy_onboarding_completed = true;
+        }
+        self.save_config_to_disk();
+    }
+
+    pub fn delete_contact_fact(&self, id: &str) -> Result<(), String> {
+        self.memory_repo
+            .delete_contact_fact(id)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn delete_contact(&self, id: &str) -> Result<(), String> {
         self.memory_repo
             .delete_contact(id)
@@ -1148,6 +1686,27 @@ impl Orchestrator {
 
     pub fn clear_last_generation_view(&self) {
         *self.last_generation_view.lock().unwrap() = None;
+    }
+
+    fn resolve_contact_id_for_view(&self, contact_id: Option<String>) -> Result<String, String> {
+        let resolved = contact_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let active = self.config.lock().unwrap().active_contact_id.clone();
+                (!active.trim().is_empty()).then_some(active)
+            })
+            .ok_or_else(|| "请先选择一个联系人。".to_string())?;
+        if self
+            .memory_repo
+            .get_contact(&resolved)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err("联系人不存在。".to_string());
+        }
+        Ok(resolved)
     }
 
     pub fn set_active_contact(&self, contact_id: String) -> Result<(), String> {
@@ -1381,7 +1940,10 @@ impl Orchestrator {
             tauri::async_runtime::spawn(async move {
                 let state = app.state::<OrchestratorState>();
                 if let Err(e) = state.0.trigger_from_selection(&app).await {
-                    tracing::error!("Orchestrator trigger error: {}", e);
+                    tracing::error!(
+                        "Orchestrator trigger failed; detail omitted from logs ({} chars)",
+                        e.chars().count()
+                    );
                 }
             });
         });
@@ -1422,7 +1984,7 @@ impl TriggerInput {
 enum GenerationInput {
     Text(String),
     Screenshot(ScreenshotInput),
-    Topic,
+    Topic(Option<String>),
 }
 
 impl GenerationInput {
@@ -1430,7 +1992,7 @@ impl GenerationInput {
         match self {
             GenerationInput::Text(_) => "text",
             GenerationInput::Screenshot(_) => "screenshot",
-            GenerationInput::Topic => "topic",
+            GenerationInput::Topic(_) => "topic",
         }
     }
 }
@@ -1439,6 +2001,13 @@ struct GenerationContext {
     contact: Option<ContactRecord>,
     policy: ContextPolicy,
     context_block: String,
+    source_cards: Vec<SourceCard>,
+}
+
+struct PersistedGenerationArtifacts {
+    context_record: Option<ContextSummaryRecord>,
+    source_context: Option<SourceContextRecord>,
+    suggestion_run: Option<SuggestionRunRecord>,
 }
 
 #[derive(Clone)]
@@ -1525,6 +2094,116 @@ fn style_profile_prompt_guide(profile_json: &str) -> String {
     }
 }
 
+fn source_context_to_card(record: &SourceContextRecord) -> SourceCard {
+    SourceCard {
+        id: record.id.clone(),
+        source_kind: record.input_kind.clone(),
+        title: if record.source_label.trim().is_empty() {
+            input_source_title(&record.input_kind).to_string()
+        } else {
+            record.source_label.clone()
+        },
+        detail: truncate_for_prompt(&record.source_excerpt, 220),
+        fact_source: record.fact_source.clone(),
+        captured_at: record.captured_at.clone(),
+        visible_message_time: record.visible_message_time.clone(),
+        inferred_chat_time: record.inferred_chat_time.clone(),
+        source_confidence: record.source_confidence,
+    }
+}
+
+fn contact_fact_source_card(fact: &ContactFactRecord) -> SourceCard {
+    SourceCard {
+        id: fact.id.clone(),
+        source_kind: "contact_fact".to_string(),
+        title: format!("用户手动补充：{}", fact_type_label(&fact.fact_type)),
+        detail: truncate_for_prompt(&fact.value, 120),
+        fact_source: fact.fact_source.clone(),
+        captured_at: if fact.captured_at.trim().is_empty() {
+            fact.created_at.clone()
+        } else {
+            fact.captured_at.clone()
+        },
+        visible_message_time: fact.visible_message_time.clone(),
+        inferred_chat_time: fact.inferred_chat_time.clone(),
+        source_confidence: if fact.source_confidence > 0.0 {
+            fact.source_confidence
+        } else {
+            fact.confidence
+        },
+    }
+}
+
+fn input_source_title(input_kind: &str) -> &'static str {
+    match input_kind {
+        "screenshot" => "当前截图",
+        "clipboard" | "text" => "当前剪贴板文本",
+        "topic" => "主动找话题",
+        "notification" => "入站通知信号",
+        "manual" => "用户手动输入",
+        _ => "当前输入",
+    }
+}
+
+fn inferred_chat_time_label(input_kind: &str) -> Option<&'static str> {
+    match input_kind {
+        "notification" => Some("inferred_from_notification"),
+        "screenshot" | "clipboard" | "text" | "topic" | "manual" => Some("unknown"),
+        _ => Some("unknown"),
+    }
+}
+
+fn input_source_confidence(input_kind: &str) -> f64 {
+    match input_kind {
+        "notification" => 0.82,
+        "manual" => 0.95,
+        "screenshot" => 0.55,
+        "clipboard" | "text" => 0.6,
+        "topic" => 0.4,
+        _ => 0.5,
+    }
+}
+
+fn fact_type_label(fact_type: &str) -> &'static str {
+    match fact_type {
+        "birth_year" => "出生年份",
+        "age_band" => "年龄段",
+        "hometown" => "籍贯",
+        "current_city" => "现居城市",
+        "work_city" => "工作城市",
+        "occupation" => "职业",
+        "preference" => "偏好",
+        "boundary" => "边界",
+        "important_date" => "重要日期",
+        "temporary_state" => "临时状态",
+        _ => "资料",
+    }
+}
+
+fn normalize_manual_fact_classification(
+    classification: &mut ContactFactClassification,
+    source_note: &str,
+) {
+    for fact in &mut classification.facts {
+        fact.fact_source = "manual".to_string();
+        fact.confidence = fact.confidence.clamp(0.0, 1.0);
+        if fact.source_note.trim().is_empty() {
+            fact.source_note = source_note.trim().to_string();
+        }
+        if fact.usage_policy.trim().is_empty() {
+            fact.usage_policy = "contextual".to_string();
+        }
+        if fact.sensitivity.trim().is_empty() {
+            fact.sensitivity = "normal".to_string();
+        }
+    }
+    if classification.usage_guidance.trim().is_empty() {
+        classification.usage_guidance =
+            "只在当前话题相关时使用这些用户手动补充资料；敏感或无关资料默认不进入生成。"
+                .to_string();
+    }
+}
+
 fn message_capture_label(message: &crate::domain::MessageRecord) -> String {
     let time = local_saved_time_label(&message.created_at);
     match message.source.as_str() {
@@ -1590,12 +2269,224 @@ fn timestamp_nanos() -> u128 {
         .unwrap_or_default()
 }
 
+pub fn log_dir_path() -> PathBuf {
+    if e2e_mock_provider_enabled() {
+        return e2e_profile_dir().join("logs");
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join("EchoMate").join("logs");
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".echomate").join("logs")
+}
+
 fn image_signature(image: &ClipboardImage) -> u64 {
     let mut hasher = DefaultHasher::new();
     image.width.hash(&mut hasher);
     image.height.hash(&mut hasher);
     image.rgba.hash(&mut hasher);
     hasher.finish()
+}
+
+fn analyze_screenshot_locally(screenshot: &ScreenshotInput) -> ScreenshotAnalysis {
+    match vision_ocr::recognize_text(&screenshot.path) {
+        Ok(lines) if !lines.is_empty() => screenshot_analysis_from_ocr(lines),
+        Ok(_) => ScreenshotAnalysis {
+            warnings: vec![
+                "本地 OCR 未识别到文字；将依赖 provider 视觉输入并保守生成。".to_string(),
+            ],
+            ..ScreenshotAnalysis::default()
+        },
+        Err(e) => ScreenshotAnalysis {
+            warnings: vec![format!("本地 Apple Vision OCR 不可用或失败：{e}")],
+            ..ScreenshotAnalysis::default()
+        },
+    }
+}
+
+fn screenshot_analysis_from_ocr(lines: Vec<OcrLine>) -> ScreenshotAnalysis {
+    let mut turns = Vec::new();
+    let mut current_time_label = String::new();
+    let mut warnings = Vec::new();
+    for line in lines {
+        let text = line.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if is_visible_time_label(text) {
+            current_time_label = text.to_string();
+            turns.push(ScreenshotTurn {
+                speaker: "system".to_string(),
+                text: text.to_string(),
+                media_kind: "system".to_string(),
+                visible_time_label: text.to_string(),
+                bbox: Some(ocr_bbox(&line)),
+                confidence: line.confidence,
+                warnings: Vec::new(),
+            });
+            continue;
+        }
+        let center_x = line.x + line.width / 2.0;
+        let speaker = if center_x >= 0.58 {
+            "me"
+        } else if center_x <= 0.42 {
+            "other"
+        } else {
+            "unknown"
+        };
+        let mut turn_warnings = Vec::new();
+        if speaker == "unknown" {
+            turn_warnings.push("气泡左右位置不明确".to_string());
+        }
+        if line.confidence < 0.55 {
+            turn_warnings.push("OCR 置信度较低".to_string());
+        }
+        warnings.extend(turn_warnings.iter().cloned());
+        turns.push(ScreenshotTurn {
+            speaker: speaker.to_string(),
+            text: text.to_string(),
+            media_kind: screenshot_media_kind(text).to_string(),
+            visible_time_label: current_time_label.clone(),
+            bbox: Some(ocr_bbox(&line)),
+            confidence: line.confidence,
+            warnings: turn_warnings,
+        });
+    }
+    let last_reply_target = turns
+        .iter()
+        .rev()
+        .find(|turn| turn.speaker == "other" && !turn.text.trim().is_empty())
+        .map(|turn| turn.text.clone())
+        .unwrap_or_default();
+    let visible_time_label = turns
+        .iter()
+        .rev()
+        .find(|turn| !turn.visible_time_label.trim().is_empty())
+        .map(|turn| turn.visible_time_label.clone())
+        .unwrap_or_default();
+    let inferred_chat_time = if visible_time_label.trim().is_empty() {
+        "unknown".to_string()
+    } else {
+        format!("visible_time_label:{visible_time_label}")
+    };
+    let staleness = if visible_time_label.trim().is_empty() {
+        "unknown"
+    } else {
+        "visible_time_only"
+    };
+    ScreenshotAnalysis {
+        turns,
+        last_reply_target,
+        visible_time_label,
+        inferred_chat_time,
+        staleness: staleness.to_string(),
+        warnings,
+    }
+}
+
+fn ocr_bbox(line: &OcrLine) -> BoundingBox {
+    BoundingBox {
+        x: line.x,
+        y: line.y,
+        width: line.width,
+        height: line.height,
+    }
+}
+
+fn is_visible_time_label(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.contains("昨天")
+        || trimmed.contains("今天")
+        || trimmed.contains("前天")
+        || trimmed.contains("上午")
+        || trimmed.contains("下午")
+        || trimmed.contains("晚上")
+        || trimmed.contains("凌晨")
+        || trimmed.contains("周")
+    {
+        return true;
+    }
+    let mut parts = trimmed.split(':');
+    let Some(hour) = parts.next() else {
+        return false;
+    };
+    let Some(minute) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && hour.chars().all(|c| c.is_ascii_digit())
+        && minute.chars().all(|c| c.is_ascii_digit())
+        && (1..=2).contains(&hour.len())
+        && minute.len() == 2
+}
+
+fn screenshot_media_kind(text: &str) -> &'static str {
+    if text.contains("[图片]") || text.contains("图片") {
+        "image"
+    } else if text.contains("[表情]") || text.contains("表情") {
+        "emoji"
+    } else if text.contains("引用") {
+        "quote"
+    } else {
+        "text"
+    }
+}
+
+fn merge_screenshot_analysis(
+    local: ScreenshotAnalysis,
+    mut provider: ScreenshotAnalysis,
+) -> ScreenshotAnalysis {
+    if provider.turns.is_empty()
+        && provider.last_reply_target.trim().is_empty()
+        && provider.visible_time_label.trim().is_empty()
+    {
+        return local;
+    }
+    if provider.visible_time_label.trim().is_empty() {
+        provider.visible_time_label = local.visible_time_label;
+    }
+    if provider.inferred_chat_time.trim().is_empty() {
+        provider.inferred_chat_time = local.inferred_chat_time;
+    }
+    if provider.staleness.trim().is_empty() {
+        provider.staleness = local.staleness;
+    }
+    if provider.last_reply_target.trim().is_empty() {
+        provider.last_reply_target = local.last_reply_target;
+    }
+    if provider.turns.is_empty() {
+        provider.turns = local.turns;
+    }
+    provider.warnings.extend(local.warnings);
+    provider
+}
+
+fn screenshot_source_confidence(analysis: &ScreenshotAnalysis) -> f64 {
+    if analysis.turns.is_empty() {
+        return 0.35;
+    }
+    (analysis
+        .turns
+        .iter()
+        .map(|turn| turn.confidence)
+        .sum::<f64>()
+        / analysis.turns.len() as f64)
+        .clamp(0.0, 1.0)
+}
+
+fn screenshot_source_metadata(analysis: Option<&ScreenshotAnalysis>) -> String {
+    analysis
+        .map(|analysis| {
+            serde_json::to_string(&serde_json::json!({
+                "last_reply_target": analysis.last_reply_target,
+                "staleness": analysis.staleness,
+                "warnings": analysis.warnings,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        })
+        .unwrap_or_else(|| "{}".to_string())
 }
 
 async fn process_due_reminders(app: &AppHandle, repo: &MemoryRepository) -> anyhow::Result<()> {
@@ -1608,6 +2499,11 @@ async fn process_due_reminders(app: &AppHandle, repo: &MemoryRepository) -> anyh
             continue;
         }
 
+        if repo.reminder_is_muted(&detail.reminder, now)? {
+            repo.snooze_reminder(&reminder_id, now + ChronoDuration::hours(12))?;
+            continue;
+        }
+
         let cooldown_since = now - ChronoDuration::minutes(RECENT_CONTACT_COOLDOWN_MINUTES);
         if repo.has_recent_copy_feedback(cooldown_since)? && !e2e_disable_cooldown_enabled() {
             repo.snooze_reminder(
@@ -1615,6 +2511,25 @@ async fn process_due_reminders(app: &AppHandle, repo: &MemoryRepository) -> anyh
                 now + ChronoDuration::minutes(RECENT_CONTACT_SNOOZE_MINUTES),
             )?;
             continue;
+        }
+
+        if !detail.reminder.contact_id.trim().is_empty() && !e2e_disable_cooldown_enabled() {
+            let daily_count = repo.recent_notified_reminder_count(
+                &detail.reminder.contact_id,
+                now - ChronoDuration::days(1),
+            )?;
+            let weekly_count = repo.recent_notified_reminder_count(
+                &detail.reminder.contact_id,
+                now - ChronoDuration::days(7),
+            )?;
+            if daily_count >= 1 {
+                repo.snooze_reminder(&reminder_id, now + ChronoDuration::days(1))?;
+                continue;
+            }
+            if weekly_count >= 2 {
+                repo.snooze_reminder(&reminder_id, now + ChronoDuration::days(3))?;
+                continue;
+            }
         }
 
         repo.mark_reminder_notified(&reminder_id)?;
@@ -1706,6 +2621,14 @@ fn e2e_mock_provider_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn e2e_profile_dir() -> PathBuf {
+    std::env::var("ECHOMATE_E2E_PROFILE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join(format!("echomate-e2e-profile-{}", std::process::id()))
+        })
+}
+
 fn has_e2e_mock_artifacts(envelope: &CandidateEnvelope) -> bool {
     envelope.context_summary.source_ref == "e2e-mock"
         || envelope
@@ -1741,40 +2664,58 @@ fn mock_e2e_envelope(source_kind: &str) -> CandidateEnvelope {
         candidates: vec![
             Candidate {
                 text: "那你明天面试加油，结束后好好休息。".to_string(),
+                intent_group: "支持".to_string(),
                 style_tags: vec!["温柔".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec!["e2e-mock".to_string()],
                 reason: "接住明确事件，保持低压".to_string(),
             },
             Candidate {
                 text: "明天面试顺利，别给自己太大压力。".to_string(),
+                intent_group: "稳妥".to_string(),
                 style_tags: vec!["稳妥".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec!["e2e-mock".to_string()],
                 reason: "轻鼓励，不追问细节".to_string(),
             },
             Candidate {
                 text: "冲，明天就当去聊一聊。".to_string(),
+                intent_group: "轻松".to_string(),
                 style_tags: vec!["轻松".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec!["e2e-mock".to_string()],
                 reason: "缓解紧张感".to_string(),
             },
             Candidate {
                 text: "早点睡，明天保持状态就好。".to_string(),
+                intent_group: "温柔".to_string(),
                 style_tags: vec!["关心".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec!["e2e-mock".to_string()],
                 reason: "自然提醒休息".to_string(),
             },
             Candidate {
                 text: "那我不打扰你准备啦，明天顺利。".to_string(),
+                intent_group: "收束".to_string(),
                 style_tags: vec!["收束".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec!["e2e-mock".to_string()],
                 reason: "适合在事件前自然收束".to_string(),
             },
         ],
+        situation: crate::domain::GenerationSituation {
+            summary: "对方明确提到明天有面试。".to_string(),
+            action_type: "wrap_up".to_string(),
+            staleness: "unknown".to_string(),
+            relationship_signal: "仅基于当前 fake fixture，不做关系判断。".to_string(),
+            confidence: 0.86,
+        },
         action_card: NextAction {
             action_type: "wrap_up".to_string(),
             reason: "她明确提到明天面试，适合轻鼓励后收束，不继续追问。".to_string(),
             confidence: 0.86,
         },
+        source_summary: "e2e mock 输出，不能进入真实上下文。".to_string(),
         memory_candidates: Vec::new(),
         reminder_candidates: Vec::new(),
         context_summary: ContextSummaryCandidate {
@@ -1782,5 +2723,6 @@ fn mock_e2e_envelope(source_kind: &str) -> CandidateEnvelope {
             source_ref: "e2e-mock".to_string(),
             summary: "对方明确提到明天有面试。".to_string(),
         },
+        screenshot_analysis: ScreenshotAnalysis::default(),
     }
 }

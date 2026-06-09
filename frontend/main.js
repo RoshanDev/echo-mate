@@ -7,11 +7,15 @@ let currentCandidates = [];
 let currentProvider = 'codex';
 let isGenerating = false;
 let currentActionCard = null;
+let currentSituation = null;
+let currentSourceSummary = '';
 let currentMemoryCandidates = [];
 let currentReminderCandidates = [];
 let currentContextSummary = null;
 let currentContextPolicy = null;
 let currentContextRecord = null;
+let currentSourceCards = [];
+let currentScreenshotAnalysis = null;
 let currentContacts = [];
 
 // Card color palette — cycles through 5 tints
@@ -70,7 +74,14 @@ function setupButtons() {
 
   const topicBtn = document.getElementById('btn-topic-generate');
   if (topicBtn) {
-    topicBtn.addEventListener('click', () => triggerGeneration('generate_topics', undefined, '正在找自然话题...'));
+    topicBtn.addEventListener('click', () => {
+      const hint = document.getElementById('topic-hint-input')?.value.trim() || '';
+      triggerGeneration(
+        'generate_topics',
+        hint ? { topicHint: hint } : { topicHint: null },
+        hint ? '正在参考你的方向找话题...' : '正在找自然话题...'
+      );
+    });
   }
 
   const screenshotBtn = document.getElementById('btn-screenshot-generate');
@@ -112,12 +123,16 @@ function handleGenerationStarted(event) {
 function handleCandidatesReady(event) {
   const data = event.payload;
   currentCandidates = data.candidates || [];
+  currentSituation = data.situation || null;
   currentActionCard = data.action_card || null;
+  currentSourceSummary = data.source_summary || '';
   currentMemoryCandidates = data.memory_candidates || [];
   currentReminderCandidates = data.reminder_candidates || [];
   currentContextSummary = data.context_summary || null;
   currentContextPolicy = data.context_policy || null;
   currentContextRecord = data.context_record || null;
+  currentSourceCards = data.source_cards || [];
+  currentScreenshotAnalysis = data.screenshot_analysis || null;
   currentProvider = data.provider || 'codex';
 
   document.getElementById('status-text').textContent = '已生成 ' + currentCandidates.length + ' 条候选回复';
@@ -177,38 +192,48 @@ function handleInboundSignal(event) {
 function renderInsights() {
   const container = document.getElementById('insights-container');
   const hasAction = currentActionCard && currentActionCard.reason;
-  const hasContext = currentContextSummary || currentContextPolicy;
+  const hasContext = currentContextSummary || currentContextPolicy || currentSourceCards.length > 0;
+  const hasScreenshot = currentScreenshotAnalysis && (
+    (currentScreenshotAnalysis.turns || []).length > 0 ||
+    currentScreenshotAnalysis.last_reply_target ||
+    (currentScreenshotAnalysis.warnings || []).length > 0
+  );
   const hasMemory = currentMemoryCandidates.length > 0;
   const hasReminder = currentReminderCandidates.length > 0;
 
-  container.style.display = (hasAction || hasContext || hasMemory || hasReminder) ? 'block' : 'none';
-  renderActionCard(currentActionCard);
-  renderContextCard(currentContextSummary, currentContextPolicy, currentContextRecord);
+  container.style.display = (hasAction || hasContext || hasScreenshot || hasMemory || hasReminder) ? 'block' : 'none';
+  renderActionCard(currentActionCard, currentSituation);
+  renderContextCard(currentContextSummary, currentContextPolicy, currentContextRecord, currentSourceCards);
+  renderScreenshotAnalysis(currentScreenshotAnalysis);
   renderMemoryCards(currentMemoryCandidates);
   renderReminderCards(currentReminderCandidates);
 }
 
-function renderActionCard(action) {
+function renderActionCard(action, situation) {
   const section = document.getElementById('action-section');
   const card = document.getElementById('action-card');
-  if (!action || !action.reason) {
+  if ((!action || !action.reason) && (!situation || !situation.summary)) {
     section.style.display = 'none';
     card.innerHTML = '';
     return;
   }
   section.style.display = 'block';
   card.innerHTML =
-    '<div class="action-type">' + escapeHtml(actionLabel(action.action_type)) + '</div>' +
-    '<div class="insight-text">' + escapeHtml(action.reason) + '</div>' +
-    '<div class="confidence">置信度 ' + confidenceText(action.confidence) + '</div>';
+    '<div class="action-type">' + escapeHtml(actionLabel(action?.action_type || situation?.action_type)) + '</div>' +
+    (situation?.summary ? '<div class="insight-text">' + escapeHtml(situation.summary) + '</div>' : '') +
+    (action?.reason ? '<div class="insight-text">' + escapeHtml(action.reason) + '</div>' : '') +
+    (situation?.staleness ? '<div class="source-line">时效：' + escapeHtml(stalenessLabel(situation.staleness)) + '</div>' : '') +
+    (situation?.relationship_signal ? '<div class="source-line">弱信号：' + escapeHtml(situation.relationship_signal) + '</div>' : '') +
+    '<div class="confidence">置信度 ' + confidenceText(action?.confidence ?? situation?.confidence) + '</div>';
 }
 
-function renderContextCard(summary, policy, record) {
+function renderContextCard(summary, policy, record, sourceCards) {
   const section = document.getElementById('context-section');
   const card = document.getElementById('context-card');
   const hasSummary = summary && (summary.summary || summary.source_ref || summary.source_kind);
   const hasPolicy = policy && policy.reason;
-  if (!hasSummary && !hasPolicy) {
+  const hasSources = Array.isArray(sourceCards) && sourceCards.length > 0;
+  if (!hasSummary && !hasPolicy && !hasSources) {
     section.style.display = 'none';
     card.innerHTML = '';
     return;
@@ -221,7 +246,9 @@ function renderContextCard(summary, policy, record) {
   card.innerHTML =
     '<div class="action-type">' + escapeHtml(allowText) + '</div>' +
     (summary?.summary ? '<div class="insight-text">' + escapeHtml(summary.summary) + '</div>' : '') +
+    (currentSourceSummary ? '<div class="insight-text">' + escapeHtml(currentSourceSummary) + '</div>' : '') +
     '<div class="source-line">来源：' + escapeHtml(source) + '</div>' +
+    renderSourceCards(sourceCards || []) +
     (policy?.reason ? '<div class="confidence">' + escapeHtml(policy.reason) + '</div>' : '') +
     (record?.id
       ? '<div class="mini-actions"><button class="tiny-btn danger" data-action="delete-context">删除这条上下文</button></div>'
@@ -237,6 +264,57 @@ function renderContextCard(summary, policy, record) {
         '<div class="confidence">后续生成不会再读取这条摘要。</div>';
     });
   }
+}
+
+function renderScreenshotAnalysis(analysis) {
+  const section = document.getElementById('screenshot-analysis-section');
+  const card = document.getElementById('screenshot-analysis-card');
+  const turns = analysis?.turns || [];
+  const warnings = analysis?.warnings || [];
+  if (!analysis || (!turns.length && !analysis.last_reply_target && !warnings.length)) {
+    section.style.display = 'none';
+    card.innerHTML = '';
+    return;
+  }
+  section.style.display = 'block';
+  const turnRows = turns.slice(-5).map((turn) =>
+    '<div class="source-card-row">' +
+      '<div class="source-card-title">' + escapeHtml(speakerLabel(turn.speaker)) + ' · ' + escapeHtml(mediaKindLabel(turn.media_kind)) + '</div>' +
+      (turn.text ? '<div class="source-card-detail">' + escapeHtml(turn.text) + '</div>' : '') +
+      '<div class="source-card-meta">' +
+        (turn.visible_time_label ? '可见时间：' + escapeHtml(turn.visible_time_label) + ' · ' : '') +
+        '可信度 ' + confidenceText(turn.confidence) +
+      '</div>' +
+    '</div>'
+  ).join('');
+  card.innerHTML =
+    (analysis.last_reply_target ? '<div class="action-type">最后可回复：' + escapeHtml(analysis.last_reply_target) + '</div>' : '') +
+    '<div class="source-line">时间：' + escapeHtml(analysis.inferred_chat_time || 'unknown') + ' · ' + escapeHtml(stalenessLabel(analysis.staleness)) + '</div>' +
+    (turnRows ? '<div class="source-card-list">' + turnRows + '</div>' : '') +
+    (warnings.length ? '<div class="confidence">提示：' + escapeHtml(warnings.slice(0, 3).join('；')) + '</div>' : '');
+}
+
+function renderSourceCards(cards) {
+  if (!Array.isArray(cards) || cards.length === 0) return '';
+  return '<div class="source-card-list">' + cards.map((card) => {
+    const timeBits = [
+      card.captured_at ? '捕获/保存：' + formatShortTime(card.captured_at) : '',
+      card.visible_message_time ? '可见时间：' + card.visible_message_time : '',
+      card.inferred_chat_time ? '聊天时间：' + card.inferred_chat_time : '',
+    ].filter(Boolean).join(' · ');
+    const confidence = Number.isFinite(Number(card.source_confidence))
+      ? '可信度 ' + confidenceText(card.source_confidence)
+      : '';
+    return '<div class="source-card-row">' +
+      '<div class="source-card-title">' + escapeHtml(card.title || sourceKindLabel(card.source_kind)) + '</div>' +
+      (card.detail ? '<div class="source-card-detail">' + escapeHtml(card.detail) + '</div>' : '') +
+      '<div class="source-card-meta">' +
+        escapeHtml(sourceFactLabel(card.fact_source)) +
+        (timeBits ? ' · ' + escapeHtml(timeBits) : '') +
+        (confidence ? ' · ' + escapeHtml(confidence) : '') +
+      '</div>' +
+    '</div>';
+  }).join('') + '</div>';
 }
 
 function renderMemoryCards(items) {
@@ -367,7 +445,9 @@ function renderCandidates(candidates) {
     const card = document.createElement('div');
     card.className = 'candidate-card ' + CARD_COLORS[i % CARD_COLORS.length];
 
-    let tagsHtml = renderTags(c.style_tags || (c.tone ? [c.tone] : []));
+    let tags = c.style_tags || (c.tone ? [c.tone] : []);
+    if (c.intent_group) tags = [c.intent_group].concat(tags);
+    let tagsHtml = renderTags(tags);
     if (c.risk_flags && c.risk_flags.length > 0 && c.risk_flags[0] !== 'none') {
       tagsHtml += '<span class="tag risk">⚠ ' + escapeHtml(c.risk_flags.join(', ')) + '</span>';
     }
@@ -375,6 +455,7 @@ function renderCandidates(candidates) {
     card.innerHTML =
       '<div class="candidate-index">候选 ' + (i + 1) + (c.reason ? ' — ' + escapeHtml(c.reason) : '') + '</div>' +
       '<div class="candidate-text">' + escapeHtml(c.text) + '</div>' +
+      (c.source_refs && c.source_refs.length ? '<div class="source-line">引用：' + escapeHtml(c.source_refs.join(' / ')) + '</div>' : '') +
       '<div class="candidate-meta">' +
         '<div class="candidate-tags">' + tagsHtml + '</div>' +
         '<button class="copy-btn" data-index="' + i + '">复制</button>' +
@@ -446,7 +527,10 @@ function renderTags(tags) {
 function sourceHtml(item) {
   const source = item.source_excerpt || item.source_ref || '';
   if (!source) return '';
-  return '<div class="source-line">来源：' + escapeHtml(source) + '</div>';
+  const sourcePrefix = item.fact_source === 'manual' || item.source_kind === 'contact_fact'
+    ? '用户手动补充'
+    : '来源';
+  return '<div class="source-line">' + escapeHtml(sourcePrefix) + '：' + escapeHtml(source) + '</div>';
 }
 
 function actionLabel(type) {
@@ -461,6 +545,39 @@ function actionLabel(type) {
   return labels[type] || '继续聊';
 }
 
+function stalenessLabel(value) {
+  const labels = {
+    fresh: '较新',
+    stale: '可能过期',
+    unknown: '时间不明',
+    visible_time_only: '仅有截图可见时间',
+    inferred: '推断时间'
+  };
+  return labels[value] || value || '时间不明';
+}
+
+function speakerLabel(value) {
+  const labels = {
+    me: '我',
+    other: '对方',
+    system: '时间/系统',
+    unknown: '未确定'
+  };
+  return labels[value] || value || '未确定';
+}
+
+function mediaKindLabel(value) {
+  const labels = {
+    text: '文本',
+    image: '图片',
+    emoji: '表情',
+    quote: '引用',
+    system: '系统',
+    unknown: '未知'
+  };
+  return labels[value] || value || '未知';
+}
+
 function memoryTypeLabel(type) {
   const labels = {
     event: '事件',
@@ -470,6 +587,33 @@ function memoryTypeLabel(type) {
     relationship_milestone: '关系节点'
   };
   return labels[type] || '记忆';
+}
+
+function sourceKindLabel(kind) {
+  const labels = {
+    clipboard: '剪贴板',
+    text: '文本',
+    screenshot: '截图',
+    topic: '找话题',
+    memory: '已批准记忆',
+    contact_fact: '用户手动补充',
+    provider_run: 'Provider 调用',
+    reminder: '提醒上下文',
+  };
+  return labels[kind] || '来源';
+}
+
+function sourceFactLabel(source) {
+  const labels = {
+    manual: '用户手动补充',
+    clipboard: '剪贴板',
+    screenshot: '截图/图片',
+    notification: '通知信号',
+    memory: '已批准记忆',
+    provider: 'Provider',
+    topic: '主动找话题',
+  };
+  return labels[source] || source || '本地来源';
 }
 
 function confidenceText(value) {
@@ -492,6 +636,18 @@ function toDatetimeLocal(value) {
 function datetimeLocalToIso(value) {
   const date = value ? new Date(value) : new Date(Date.now() + 60 * 60 * 1000);
   return date.toISOString();
+}
+
+function formatShortTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function refreshInsightContainer() {
@@ -619,4 +775,6 @@ function setGenerating(active) {
     const btn = document.getElementById(id);
     if (btn) btn.disabled = active;
   });
+  const topicHint = document.getElementById('topic-hint-input');
+  if (topicHint) topicHint.disabled = active;
 }

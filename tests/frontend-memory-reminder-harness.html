@@ -98,7 +98,7 @@
           return Promise.resolve([
             {
               id: 'contact-1',
-              alias: '齐齐',
+              alias: '测试联系人A',
               channel: 'wechat',
               is_allowlisted: true,
               created_at: '2026-06-08T10:00:00Z',
@@ -252,8 +252,8 @@
         context_policy: {
           allowlisted: true,
           contact_id: 'contact-1',
-          contact_alias: '齐齐',
-          reason: '当前联系人「齐齐」在白名单中，可保存用户确认的上下文。',
+          contact_alias: '测试联系人A',
+          reason: '当前联系人「测试联系人A」在白名单中，可保存用户确认的上下文。',
           can_save_context: true,
           global_privacy_mode: false,
         },
@@ -265,6 +265,30 @@
           summary: '对方提到明天面试。',
           created_at: '2026-06-08T10:00:00Z',
         },
+        source_cards: [
+          {
+            id: 'src-1',
+            source_kind: 'clipboard',
+            title: '当前剪贴板文本',
+            detail: '我明天面试',
+            fact_source: 'clipboard',
+            captured_at: '2026-06-08T10:00:00Z',
+            visible_message_time: '',
+            inferred_chat_time: 'unknown',
+            source_confidence: 0.6,
+          },
+          {
+            id: 'fact-1',
+            source_kind: 'contact_fact',
+            title: '用户手动补充：籍贯',
+            detail: 'A 市',
+            fact_source: 'manual',
+            captured_at: '2026-06-08T10:00:00Z',
+            visible_message_time: '',
+            inferred_chat_time: '',
+            source_confidence: 0.9,
+          },
+        ],
       };
     }
 
@@ -274,6 +298,8 @@
       await sleep(50);
       assert(document.body.textContent.includes('当前适合做什么'), 'missing action section');
       assert(document.body.textContent.includes('上下文来源'), 'missing context source section');
+      assert(document.body.textContent.includes('用户手动补充：籍贯'), 'manual source card missing');
+      assert(document.body.textContent.includes('聊天时间：unknown'), 'time confidence line missing');
       assert(document.body.textContent.includes('删除这条上下文'), 'missing delete context action');
       assert(!document.getElementById('popup').textContent.includes('自动发送'), 'popup should not claim auto-send behavior');
       assert(document.body.textContent.includes('可能值得记住'), 'missing memory section');

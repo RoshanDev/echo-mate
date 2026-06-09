@@ -1,4 +1,4 @@
-use crate::domain::CandidateEnvelope;
+use crate::domain::{CandidateEnvelope, ContactFactClassification};
 use crate::provider::process::wait_with_timeout;
 use crate::provider::wsl;
 use std::path::PathBuf;
@@ -95,18 +95,89 @@ impl ClaudeProvider {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!("Claude failed (exit {}): {}", output.status, stderr);
-            anyhow::bail!("Claude failed (exit {}): {}", output.status, stderr);
+            tracing::error!(
+                "Claude failed (exit {}), stderr bytes {}",
+                output.status,
+                output.stderr.len()
+            );
+            anyhow::bail!(
+                "Claude failed (exit {}). stderr: {}",
+                output.status,
+                preview(&stderr, 500)
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::info!("Claude stdout length: {} bytes", stdout.len());
 
-        let debug_dir = std::env::temp_dir().join("echomate-claude");
-        let _ = std::fs::create_dir_all(&debug_dir);
-        let _ = std::fs::write(debug_dir.join("last-claude-output.json"), stdout.as_bytes());
-
         parse_json_output(&stdout)
+    }
+
+    pub async fn classify_contact_facts(
+        &self,
+        prompt: &str,
+        schema: &serde_json::Value,
+    ) -> anyhow::Result<ContactFactClassification> {
+        tracing::info!(
+            "ClaudeProvider::classify_contact_facts called, binary={}, timeout={:?}",
+            self.binary,
+            self.timeout
+        );
+
+        tokio::fs::create_dir_all(&self.workspace).await?;
+        let schema_str = serde_json::to_string(schema)?;
+
+        let mut cmd = wsl::wsl_command(&self.binary);
+        cmd.arg("-p")
+            .arg("--output-format")
+            .arg("json")
+            .arg("--no-session-persistence")
+            .arg("--max-turns")
+            .arg("5");
+
+        if wsl::is_windows() {
+            let schema_file = self.workspace.join("contact-fact-schema.json");
+            std::fs::write(&schema_file, &schema_str)?;
+            let wsl_schema_path = wsl::to_wsl_path(&schema_file);
+
+            let wsl_binary = wsl::wsl_binary_path(&self.binary);
+            let shell_cmd = format!(
+                r#"{} -p --output-format json --json-schema "$(cat {})" --no-session-persistence --max-turns 5 "$@""#,
+                wsl_binary,
+                wsl_schema_path.display()
+            );
+            cmd = wsl::new_wsl_command();
+            cmd.arg("-e").arg("bash").arg("-c").arg(&shell_cmd);
+            cmd.arg("--");
+            cmd.arg(prompt);
+        } else {
+            cmd.arg("--json-schema").arg(&schema_str);
+            cmd.arg(prompt);
+            cmd.current_dir(&self.workspace);
+        }
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Claude could not start: {}", e))?;
+        let output = wait_with_timeout(child, self.timeout, "Claude").await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            anyhow::bail!(
+                "Claude failed (exit {}). stderr: {} stdout: {}",
+                output.status,
+                preview(&stderr, 500),
+                preview(&stdout, 300)
+            );
+        }
+
+        parse_contact_fact_output(&stdout)
     }
 }
 
@@ -134,10 +205,10 @@ fn parse_json_output(stdout: &str) -> anyhow::Result<CandidateEnvelope> {
     }
 
     anyhow::bail!(
-        "Failed to parse CandidateEnvelope. Top-level: {}. Keys: {:?}. result(first 300): {:.300}",
+        "Claude output JSON schema drift: expected CandidateEnvelope. Top-level: {}. Keys: {:?}. result(first 300): {}",
         value_kind(&wrapped),
         object_keys(&wrapped),
-        wrapped.get("result").and_then(|v| v.as_str()).unwrap_or(""),
+        preview(wrapped.get("result").and_then(|v| v.as_str()).unwrap_or(""), 300),
     )
 }
 
@@ -209,6 +280,85 @@ fn parse_candidate_envelope_from_text(text: &str) -> Option<CandidateEnvelope> {
     serde_json::from_str::<CandidateEnvelope>(&text[start..=end]).ok()
 }
 
+fn parse_contact_fact_output(stdout: &str) -> anyhow::Result<ContactFactClassification> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Claude returned empty output for contact fact classification");
+    }
+    let wrapped: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+        anyhow::anyhow!(
+            "Claude contact fact output not valid JSON: {}. Raw(first 300): {}",
+            e,
+            preview(trimmed, 300)
+        )
+    })?;
+
+    if let Some(classification) = parse_contact_fact_value(&wrapped) {
+        return Ok(classification);
+    }
+
+    anyhow::bail!(
+        "Claude contact fact schema drift: expected facts/warnings/usage_guidance. Top-level: {}. Keys: {:?}. result(first 300): {}",
+        value_kind(&wrapped),
+        object_keys(&wrapped),
+        preview(wrapped.get("result").and_then(|v| v.as_str()).unwrap_or(""), 300),
+    )
+}
+
+fn parse_contact_fact_value(value: &serde_json::Value) -> Option<ContactFactClassification> {
+    if value.get("facts").is_some() {
+        if let Ok(classification) =
+            serde_json::from_value::<ContactFactClassification>(value.clone())
+        {
+            return Some(classification);
+        }
+    }
+
+    if let Some(so) = value
+        .get("structured_output")
+        .filter(|item| !item.is_null())
+    {
+        if let Some(classification) = parse_contact_fact_value(so) {
+            return Some(classification);
+        }
+    }
+
+    if let Some(result) = value.get("result").filter(|item| !item.is_null()) {
+        if let Some(classification) = parse_contact_fact_value(result) {
+            return Some(classification);
+        }
+        if let Some(text) = result.as_str() {
+            if let Ok(classification) = serde_json::from_str::<ContactFactClassification>(text) {
+                return Some(classification);
+            }
+        }
+    }
+
+    if let Some(content) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())
+    {
+        for item in content.iter().rev() {
+            if item.get("name").and_then(|name| name.as_str()) == Some("StructuredOutput") {
+                if let Some(input) = item.get("input") {
+                    if let Some(classification) = parse_contact_fact_value(input) {
+                        return Some(classification);
+                    }
+                }
+            }
+            if let Some(text) = item.get("text").and_then(|text| text.as_str()) {
+                if let Ok(classification) = serde_json::from_str::<ContactFactClassification>(text)
+                {
+                    return Some(classification);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn value_kind(value: &serde_json::Value) -> &'static str {
     match value {
         serde_json::Value::Null => "null",
@@ -225,6 +375,16 @@ fn object_keys(value: &serde_json::Value) -> Vec<&String> {
         .as_object()
         .map(|object| object.keys().collect::<Vec<_>>())
         .unwrap_or_default()
+}
+
+fn preview(raw: &str, max_chars: usize) -> String {
+    let mut chars = raw.trim().chars();
+    let head = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_none() {
+        raw.trim().to_string()
+    } else {
+        format!("{head}...")
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -320,7 +480,7 @@ printf '%s\n' '{"structured_output":{"candidates":[]}}'
                                 "reminder_candidates": [],
                                 "context_summary": {
                                     "source_kind": "manual",
-                                    "source_ref": "主动找齐齐开启话题",
+                                    "source_ref": "主动找测试联系人A开启话题",
                                     "summary": "主动找话题"
                                 }
                             }
@@ -350,7 +510,7 @@ printf '%s\n' '{"structured_output":{"candidates":[]}}'
                     "reminder_candidates": [],
                     "context_summary": {
                         "source_kind": "manual",
-                        "source_ref": "主动找齐齐开启话题",
+                        "source_ref": "主动找测试联系人A开启话题",
                         "summary": "主动找话题"
                     }
                 }
@@ -364,6 +524,47 @@ printf '%s\n' '{"structured_output":{"candidates":[]}}'
             "今天过得怎么样，有没有好好吃饭～"
         );
         assert_eq!(envelope.action_card.action_type, "light_follow_up");
+    }
+
+    #[test]
+    fn claude_parse_reports_schema_drift() {
+        let err = parse_json_output(r#"{"result":"{}","unexpected":true}"#)
+            .expect_err("schema drift should fail");
+        assert!(err.to_string().contains("schema drift"));
+        assert!(err.to_string().contains("unexpected"));
+    }
+
+    #[test]
+    fn claude_parse_contact_fact_output_accepts_tool_input() {
+        let raw = serde_json::json!({
+            "message": {
+                "content": [
+                    {
+                        "name": "StructuredOutput",
+                        "input": {
+                            "facts": [
+                                {
+                                    "fact_type": "work_city",
+                                    "value": "B 市",
+                                    "normalized_value": "B 市",
+                                    "source_note": "在 B 市工作",
+                                    "fact_source": "manual",
+                                    "sensitivity": "normal",
+                                    "confidence": 0.92,
+                                    "ttl_days": null,
+                                    "usage_policy": "contextual"
+                                }
+                            ],
+                            "warnings": [],
+                            "usage_guidance": "只在相关场景使用。"
+                        }
+                    }
+                ]
+            }
+        });
+        let parsed = parse_contact_fact_output(&raw.to_string()).expect("contact facts parse");
+        assert_eq!(parsed.facts.len(), 1);
+        assert_eq!(parsed.facts[0].fact_type, "work_city");
     }
 
     fn test_dir(name: &str) -> PathBuf {

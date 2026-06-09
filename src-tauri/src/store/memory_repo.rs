@@ -1,8 +1,11 @@
 // Memory repository for style profiles, contact facts, and reminder MVP data.
 use crate::domain::{
-    Candidate, ContactInput, ContactRecord, ContextSummaryCandidate, ContextSummaryRecord,
-    MemoryCandidate, MemoryItemRecord, MessageRecord, NextAction, ReminderCandidate,
-    ReminderDetail, ReminderRecord, ReplyFeedbackRecord, StyleProfileRecord,
+    Candidate, ContactFactCandidate, ContactFactRecord, ContactInput, ContactRecord,
+    ContextSummaryCandidate, ContextSummaryRecord, DataAuditCount, DataAuditReport,
+    DataContaminationFinding, MemoryCandidate, MemoryCandidateRecord, MemoryItemRecord,
+    MessageRecord, NextAction, RelationshipCard, ReminderCandidate, ReminderCenterItem,
+    ReminderDetail, ReminderRecord, ReplyFeedbackRecord, ScreenshotAnalysis, SourceCard,
+    SourceContextRecord, StyleProfileRecord, SuggestionRunRecord,
 };
 use crate::store::migrations::run_migrations;
 use anyhow::{anyhow, bail};
@@ -152,6 +155,22 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute("DELETE FROM messages WHERE contact_id = ?1", params![id])?;
         conn.execute(
+            "DELETE FROM message_events WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM memory_candidates WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM suggestion_runs WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM contact_facts WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
             "DELETE FROM platform_signal_log WHERE contact_id = ?1",
             params![id],
         )?;
@@ -168,6 +187,10 @@ impl MemoryRepository {
              SET status = 'cancelled', updated_at = ?2
              WHERE memory_id IN (SELECT id FROM memory_item WHERE contact_id = ?1)",
             params![id, now_rfc3339()],
+        )?;
+        conn.execute(
+            "DELETE FROM source_contexts WHERE contact_id = ?1",
+            params![id],
         )?;
         conn.execute("DELETE FROM contacts WHERE id = ?1", params![id])?;
         Ok(())
@@ -177,7 +200,23 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute("DELETE FROM messages WHERE contact_id = ?1", params![id])?;
         conn.execute(
+            "DELETE FROM message_events WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM memory_candidates WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
             "DELETE FROM reply_feedback WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM suggestion_runs WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM contact_facts WHERE contact_id = ?1",
             params![id],
         )?;
         conn.execute(
@@ -197,6 +236,10 @@ impl MemoryRepository {
              SET status = 'cancelled', updated_at = ?2
              WHERE memory_id IN (SELECT id FROM memory_item WHERE contact_id = ?1)",
             params![id, now_rfc3339()],
+        )?;
+        conn.execute(
+            "DELETE FROM source_contexts WHERE contact_id = ?1",
+            params![id],
         )?;
         Ok(())
     }
@@ -208,6 +251,24 @@ impl MemoryRepository {
         text: &str,
         source: &str,
         approved: bool,
+    ) -> anyhow::Result<MessageRecord> {
+        self.append_message_with_source_context(
+            contact_id, role, text, source, approved, None, None, None, None, 0.0,
+        )
+    }
+
+    pub fn append_message_with_source_context(
+        &self,
+        contact_id: &str,
+        role: &str,
+        text: &str,
+        source: &str,
+        approved: bool,
+        source_context_id: Option<&str>,
+        captured_at: Option<&str>,
+        visible_message_time: Option<&str>,
+        inferred_chat_time: Option<&str>,
+        source_confidence: f64,
     ) -> anyhow::Result<MessageRecord> {
         if contact_id.trim().is_empty() {
             bail!("contact_id is required to save a message");
@@ -226,8 +287,10 @@ impl MemoryRepository {
         };
         let conn = self.connection()?;
         conn.execute(
-            "INSERT INTO messages (id, contact_id, role, text, source, approved, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages
+                (id, contact_id, role, text, source, approved, created_at,
+                 source_context_id, captured_at, visible_message_time, inferred_chat_time, source_confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 &record.id,
                 &record.contact_id,
@@ -235,7 +298,72 @@ impl MemoryRepository {
                 &record.text,
                 &record.source,
                 bool_to_i64(record.approved),
-                &record.created_at
+                &record.created_at,
+                source_context_id.unwrap_or_default(),
+                captured_at.unwrap_or_default(),
+                visible_message_time.unwrap_or_default(),
+                inferred_chat_time.unwrap_or_default(),
+                source_confidence.clamp(0.0, 1.0)
+            ],
+        )?;
+        let source_context_id_value = source_context_id.unwrap_or_default();
+        let source_meta = if source_context_id_value.trim().is_empty() {
+            None
+        } else {
+            source_context_event_meta(&conn, source_context_id_value)?
+        };
+        let input_kind = source_meta
+            .as_ref()
+            .map(|meta| meta.input_kind.as_str())
+            .unwrap_or(source);
+        let fact_source = source_meta
+            .as_ref()
+            .map(|meta| meta.fact_source.as_str())
+            .unwrap_or(source);
+        let provider = source_meta
+            .as_ref()
+            .map(|meta| meta.provider.as_str())
+            .unwrap_or_default();
+        let captured_at_value = source_meta
+            .as_ref()
+            .map(|meta| meta.captured_at.as_str())
+            .or(captured_at)
+            .unwrap_or_default();
+        let visible_message_time_value = source_meta
+            .as_ref()
+            .map(|meta| meta.visible_message_time.as_str())
+            .or(visible_message_time)
+            .unwrap_or_default();
+        let inferred_chat_time_value = source_meta
+            .as_ref()
+            .map(|meta| meta.inferred_chat_time.as_str())
+            .or(inferred_chat_time)
+            .unwrap_or_default();
+        let source_confidence_value = source_meta
+            .as_ref()
+            .map(|meta| meta.source_confidence)
+            .unwrap_or_else(|| source_confidence.clamp(0.0, 1.0));
+        conn.execute(
+            "INSERT INTO message_events
+                (id, message_id, contact_id, role, text_excerpt, provider, input_kind, fact_source,
+                 source_context_id, created_at, captured_at, visible_message_time, inferred_chat_time,
+                 source_confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                next_id("mev"),
+                &record.id,
+                &record.contact_id,
+                &record.role,
+                truncate_chars(&record.text, 500),
+                provider,
+                non_empty(input_kind, "manual"),
+                non_empty(fact_source, "manual"),
+                source_context_id_value,
+                &record.created_at,
+                captured_at_value,
+                visible_message_time_value,
+                inferred_chat_time_value,
+                source_confidence_value
             ],
         )?;
         Ok(record)
@@ -282,6 +410,987 @@ impl MemoryRepository {
             "SELECT COUNT(*) FROM platform_signal_log WHERE contact_id = ?1",
             params![contact_id],
             |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn insert_source_context(
+        &self,
+        contact_id: &str,
+        provider: &str,
+        input_kind: &str,
+        fact_source: &str,
+        source_label: &str,
+        source_excerpt: &str,
+        captured_at: Option<&str>,
+        visible_message_time: Option<&str>,
+        inferred_chat_time: Option<&str>,
+        source_confidence: f64,
+        metadata_json: &str,
+    ) -> anyhow::Result<SourceContextRecord> {
+        if contact_id.trim().is_empty() {
+            bail!("contact_id is required to save a source context");
+        }
+        let now = now_rfc3339();
+        let record = SourceContextRecord {
+            id: next_id("src"),
+            contact_id: contact_id.to_string(),
+            provider: provider.trim().to_string(),
+            input_kind: non_empty(input_kind, "clipboard"),
+            fact_source: non_empty(fact_source, input_kind),
+            source_label: source_label.trim().to_string(),
+            source_excerpt: truncate_chars(source_excerpt.trim(), 500),
+            created_at: now.clone(),
+            captured_at: captured_at.unwrap_or(&now).to_string(),
+            visible_message_time: visible_message_time.unwrap_or_default().to_string(),
+            inferred_chat_time: inferred_chat_time.unwrap_or_default().to_string(),
+            source_confidence: source_confidence.clamp(0.0, 1.0),
+            metadata_json: if metadata_json.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                metadata_json.to_string()
+            },
+        };
+
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO source_contexts
+                (id, contact_id, provider, input_kind, fact_source, source_label, source_excerpt,
+                 created_at, captured_at, visible_message_time, inferred_chat_time,
+                 source_confidence, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                &record.id,
+                &record.contact_id,
+                &record.provider,
+                &record.input_kind,
+                &record.fact_source,
+                &record.source_label,
+                &record.source_excerpt,
+                &record.created_at,
+                &record.captured_at,
+                &record.visible_message_time,
+                &record.inferred_chat_time,
+                record.source_confidence,
+                &record.metadata_json
+            ],
+        )?;
+        Ok(record)
+    }
+
+    pub fn record_suggestion_run(
+        &self,
+        contact_id: &str,
+        provider: &str,
+        input_kind: &str,
+        source_context_id: Option<&str>,
+        source_cards: &[SourceCard],
+        output_summary: &str,
+    ) -> anyhow::Result<SuggestionRunRecord> {
+        if contact_id.trim().is_empty() {
+            bail!("contact_id is required to save a suggestion run");
+        }
+        let conn = self.connection()?;
+        let source_context_id_value = source_context_id.unwrap_or_default();
+        let source_meta = if source_context_id_value.trim().is_empty() {
+            None
+        } else {
+            source_context_event_meta(&conn, source_context_id_value)?
+        };
+        let created_at = now_rfc3339();
+        let input_kind_value = non_empty(input_kind, "clipboard");
+        let fact_source = source_meta
+            .as_ref()
+            .map(|meta| meta.fact_source.clone())
+            .unwrap_or_else(|| input_kind_value.clone());
+        let captured_at = source_meta
+            .as_ref()
+            .map(|meta| fallback_if_empty(meta.captured_at.clone(), created_at.clone()))
+            .unwrap_or_else(|| created_at.clone());
+        let record = SuggestionRunRecord {
+            id: next_id("run"),
+            contact_id: contact_id.to_string(),
+            provider: provider.trim().to_string(),
+            input_kind: input_kind_value,
+            fact_source,
+            source_context_id: source_context_id_value.to_string(),
+            context_sources_json: serde_json::to_string(source_cards)?,
+            output_summary: truncate_chars(output_summary.trim(), 500),
+            created_at,
+            captured_at,
+            visible_message_time: source_meta
+                .as_ref()
+                .map(|meta| meta.visible_message_time.clone())
+                .unwrap_or_default(),
+            inferred_chat_time: source_meta
+                .as_ref()
+                .map(|meta| meta.inferred_chat_time.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            source_confidence: source_meta
+                .as_ref()
+                .map(|meta| meta.source_confidence)
+                .unwrap_or_default(),
+        };
+        conn.execute(
+            "INSERT INTO suggestion_runs
+                (id, contact_id, provider, input_kind, fact_source, source_context_id,
+                 context_sources_json, output_summary, created_at, captured_at,
+                 visible_message_time, inferred_chat_time, source_confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                &record.id,
+                &record.contact_id,
+                &record.provider,
+                &record.input_kind,
+                &record.fact_source,
+                &record.source_context_id,
+                &record.context_sources_json,
+                &record.output_summary,
+                &record.created_at,
+                &record.captured_at,
+                &record.visible_message_time,
+                &record.inferred_chat_time,
+                record.source_confidence
+            ],
+        )?;
+        Ok(record)
+    }
+
+    pub fn insert_screenshot_analysis(
+        &self,
+        contact_id: &str,
+        source_context_id: Option<&str>,
+        image_path: &str,
+        image_width: u32,
+        image_height: u32,
+        ocr_provider: &str,
+        analysis: &ScreenshotAnalysis,
+    ) -> anyhow::Result<()> {
+        let confidence = if analysis.turns.is_empty() {
+            0.0
+        } else {
+            analysis
+                .turns
+                .iter()
+                .map(|turn| turn.confidence)
+                .sum::<f64>()
+                / analysis.turns.len() as f64
+        };
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO screenshot_analyses
+                (id, contact_id, source_context_id, image_path, image_width, image_height,
+                 parser_version, ocr_provider, turns_json, last_reply_target,
+                 visible_time_label, inferred_chat_time, staleness, warnings_json,
+                 confidence, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'screenshot-v2-local-ocr', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                next_id("shot"),
+                contact_id,
+                source_context_id.unwrap_or_default(),
+                image_path,
+                image_width as i64,
+                image_height as i64,
+                ocr_provider,
+                serde_json::to_string(&analysis.turns)?,
+                &analysis.last_reply_target,
+                &analysis.visible_time_label,
+                &analysis.inferred_chat_time,
+                &analysis.staleness,
+                serde_json::to_string(&analysis.warnings)?,
+                confidence.clamp(0.0, 1.0),
+                now_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_memory_candidates_for_run(
+        &self,
+        contact_id: &str,
+        suggestion_run_id: &str,
+        source_context_id: Option<&str>,
+        candidates: &[MemoryCandidate],
+    ) -> anyhow::Result<usize> {
+        if contact_id.trim().is_empty() {
+            bail!("contact_id is required to save memory candidates");
+        }
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.connection()?;
+        let source_context_id_value = source_context_id.unwrap_or_default();
+        let source_meta = if source_context_id_value.trim().is_empty() {
+            None
+        } else {
+            source_context_event_meta(&conn, source_context_id_value)?
+        };
+        let mut inserted = 0;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if candidate.value.trim().is_empty() {
+                continue;
+            }
+            let created_at = now_rfc3339();
+            let input_kind = source_meta
+                .as_ref()
+                .map(|meta| meta.input_kind.as_str())
+                .unwrap_or(&candidate.source_kind);
+            let fact_source = source_meta
+                .as_ref()
+                .map(|meta| meta.fact_source.as_str())
+                .unwrap_or(&candidate.source_kind);
+            conn.execute(
+                "INSERT INTO memory_candidates
+                    (id, contact_id, suggestion_run_id, source_context_id, candidate_index,
+                     memory_type, summary, value, source_kind, source_ref, source_excerpt,
+                     source_quote, reason, fact_source, confidence, sensitivity, expires_at,
+                     ttl_days, status, created_at, captured_at, visible_message_time,
+                     inferred_chat_time, source_confidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 'candidate', ?19, ?20, ?21, ?22, ?23)",
+                params![
+                    next_id("mcand"),
+                    contact_id,
+                    suggestion_run_id,
+                    source_context_id_value,
+                    index as i64,
+                    non_empty(&candidate.memory_type, "event"),
+                    truncate_chars(
+                        non_empty(&candidate.summary, candidate.value.trim()).trim(),
+                        500
+                    ),
+                    truncate_chars(candidate.value.trim(), 500),
+                    non_empty(&candidate.source_kind, input_kind),
+                    truncate_chars(candidate.source_ref.trim(), 200),
+                    truncate_chars(candidate.source_excerpt.trim(), 500),
+                    truncate_chars(
+                        non_empty(&candidate.source_quote, &candidate.source_excerpt).trim(),
+                        500
+                    ),
+                    truncate_chars(candidate.reason.trim(), 500),
+                    non_empty(fact_source, "unknown"),
+                    candidate.confidence.clamp(0.0, 1.0),
+                    non_empty(&candidate.sensitivity, "normal"),
+                    &candidate.expires_at,
+                    candidate.ttl_days,
+                    &created_at,
+                    source_meta
+                        .as_ref()
+                        .map(|meta| meta.captured_at.as_str())
+                        .unwrap_or_default(),
+                    source_meta
+                        .as_ref()
+                        .map(|meta| meta.visible_message_time.as_str())
+                        .unwrap_or_default(),
+                    source_meta
+                        .as_ref()
+                        .map(|meta| meta.inferred_chat_time.as_str())
+                        .unwrap_or_default(),
+                    source_meta
+                        .as_ref()
+                        .map(|meta| meta.source_confidence)
+                        .unwrap_or_default()
+                ],
+            )?;
+            inserted += 1;
+        }
+        Ok(inserted)
+    }
+
+    pub fn recent_source_cards(
+        &self,
+        contact_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SourceCard>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, input_kind, fact_source, source_label, source_excerpt,
+                    created_at, captured_at, visible_message_time, inferred_chat_time, source_confidence
+             FROM source_contexts
+             WHERE contact_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![contact_id, limit as i64], |row| {
+            let id: String = row.get(0)?;
+            let source_kind: String = row.get(1)?;
+            let fact_source: String = row.get(2)?;
+            let source_label: String = row.get(3)?;
+            let source_excerpt: String = row.get(4)?;
+            let created_at: String = row.get(5)?;
+            let captured_at: String = row.get(6)?;
+            Ok(SourceCard {
+                id,
+                source_kind,
+                title: source_label,
+                detail: source_excerpt,
+                fact_source,
+                captured_at: fallback_if_empty(captured_at, created_at),
+                visible_message_time: row.get(7)?,
+                inferred_chat_time: row.get(8)?,
+                source_confidence: row.get(9)?,
+            })
+        })?;
+        let mut cards = rows.collect::<Result<Vec<_>, _>>()?;
+        cards.reverse();
+        Ok(cards)
+    }
+
+    pub fn list_contact_facts(&self, contact_id: &str) -> anyhow::Result<Vec<ContactFactRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, contact_id, fact_type, value, normalized_value, source_note,
+                    provider, input_kind, fact_source, sensitivity, confidence, ttl_days,
+                    usage_policy, created_at, captured_at, visible_message_time,
+                    inferred_chat_time, source_confidence, updated_at, last_used_at
+             FROM contact_facts
+             WHERE contact_id = ?1
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![contact_id], contact_fact_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn prompt_contact_facts(
+        &self,
+        contact_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ContactFactRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, contact_id, fact_type, value, normalized_value, source_note,
+                    provider, input_kind, fact_source, sensitivity, confidence, ttl_days,
+                    usage_policy, created_at, captured_at, visible_message_time,
+                    inferred_chat_time, source_confidence, updated_at, last_used_at
+             FROM contact_facts
+             WHERE contact_id = ?1
+               AND sensitivity NOT IN ('high', 'forbidden')
+               AND usage_policy NOT IN ('never', 'disabled')
+             ORDER BY updated_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![contact_id, limit as i64], contact_fact_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn save_contact_facts(
+        &self,
+        contact_id: &str,
+        facts: &[ContactFactCandidate],
+    ) -> anyhow::Result<Vec<ContactFactRecord>> {
+        if contact_id.trim().is_empty() {
+            bail!("contact_id is required to save contact facts");
+        }
+        let conn = self.connection()?;
+        let mut saved = Vec::new();
+        for fact in facts {
+            ensure_allowed_sensitivity(&fact.sensitivity)?;
+            let value = fact.value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let fact_type = non_empty(&fact.fact_type, "note");
+            let normalized_value = fallback_if_empty(
+                fact.normalized_value.trim().to_lowercase(),
+                value.trim().to_lowercase(),
+            );
+            let fact_source = non_empty(&fact.fact_source, "manual");
+            let now = now_rfc3339();
+            let id = next_id("fact");
+            conn.execute(
+                "INSERT INTO contact_facts
+                    (id, contact_id, fact_type, value, normalized_value, source_note,
+                     provider, input_kind, fact_source, sensitivity, confidence, ttl_days,
+                     usage_policy, created_at, captured_at, visible_message_time,
+                     inferred_chat_time, source_confidence, updated_at, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', 'manual', ?7, ?8, ?9, ?10, ?11, ?12, ?12, '', 'unknown', ?9, ?13, '')
+                 ON CONFLICT(contact_id, fact_type, normalized_value, fact_source) DO UPDATE SET
+                    value = excluded.value,
+                    source_note = excluded.source_note,
+                    provider = excluded.provider,
+                    input_kind = excluded.input_kind,
+                    sensitivity = excluded.sensitivity,
+                    confidence = excluded.confidence,
+                    ttl_days = excluded.ttl_days,
+                    usage_policy = excluded.usage_policy,
+                    captured_at = excluded.captured_at,
+                    visible_message_time = excluded.visible_message_time,
+                    inferred_chat_time = excluded.inferred_chat_time,
+                    source_confidence = excluded.source_confidence,
+                    updated_at = excluded.updated_at",
+                params![
+                    &id,
+                    contact_id,
+                    &fact_type,
+                    value,
+                    &normalized_value,
+                    truncate_chars(fact.source_note.trim(), 500),
+                    &fact_source,
+                    non_empty(&fact.sensitivity, "normal"),
+                    fact.confidence.clamp(0.0, 1.0),
+                    fact.ttl_days,
+                    non_empty(&fact.usage_policy, "contextual"),
+                    &now,
+                    &now,
+                ],
+            )?;
+            let record = self.get_contact_fact_by_key(
+                contact_id,
+                &fact_type,
+                &normalized_value,
+                &fact_source,
+            )?;
+            saved.push(record);
+        }
+        Ok(saved)
+    }
+
+    pub fn delete_contact_fact(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM contact_facts WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn contact_fact_count(&self, contact_id: &str) -> anyhow::Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM contact_facts WHERE contact_id = ?1",
+            params![contact_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn suggestion_run_count(&self, contact_id: &str) -> anyhow::Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM suggestion_runs WHERE contact_id = ?1",
+            params![contact_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn message_event_count(&self, contact_id: &str) -> anyhow::Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM message_events WHERE contact_id = ?1",
+            params![contact_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn memory_candidate_count(&self, contact_id: &str) -> anyhow::Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM memory_candidates WHERE contact_id = ?1",
+            params![contact_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn list_memory_candidates(
+        &self,
+        contact_id: &str,
+        status: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryCandidateRecord>> {
+        let conn = self.connection()?;
+        let status = status.unwrap_or("candidate");
+        let mut stmt = conn.prepare(
+            "SELECT id, contact_id, suggestion_run_id, source_context_id, candidate_index,
+                    memory_type, summary, value, source_kind, source_ref, source_excerpt,
+                    source_quote, reason, fact_source, confidence, sensitivity, expires_at,
+                    ttl_days, status, created_at, captured_at, visible_message_time,
+                    inferred_chat_time, source_confidence
+             FROM memory_candidates
+             WHERE contact_id = ?1 AND status = ?2
+             ORDER BY created_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![contact_id, status, limit as i64],
+            memory_candidate_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn confirm_memory_candidate(&self, id: &str) -> anyhow::Result<MemoryItemRecord> {
+        let conn = self.connection()?;
+        let candidate = conn.query_row(
+            "SELECT id, contact_id, suggestion_run_id, source_context_id, candidate_index,
+                    memory_type, summary, value, source_kind, source_ref, source_excerpt,
+                    source_quote, reason, fact_source, confidence, sensitivity, expires_at,
+                    ttl_days, status, created_at, captured_at, visible_message_time,
+                    inferred_chat_time, source_confidence
+             FROM memory_candidates
+             WHERE id = ?1
+             LIMIT 1",
+            params![id],
+            memory_candidate_from_row,
+        )?;
+        if candidate.status != "candidate" {
+            bail!("这条候选记忆已处理，不能重复保存");
+        }
+        let expires_at = if candidate.expires_at.trim().is_empty() {
+            candidate
+                .ttl_days
+                .map(|days| to_rfc3339(Utc::now() + Duration::days(days.max(1))))
+                .unwrap_or_default()
+        } else {
+            candidate.expires_at.clone()
+        };
+        let saved = self.save_memory_candidate_for_contact(
+            Some(&candidate.contact_id),
+            &MemoryCandidate {
+                memory_type: candidate.memory_type.clone(),
+                summary: candidate.summary.clone(),
+                value: candidate.value.clone(),
+                source_kind: candidate.source_kind.clone(),
+                source_ref: candidate.source_ref.clone(),
+                source_excerpt: fallback_if_empty(
+                    candidate.source_excerpt.clone(),
+                    candidate.source_quote.clone(),
+                ),
+                source_quote: candidate.source_quote.clone(),
+                reason: candidate.reason.clone(),
+                confidence: candidate.confidence,
+                sensitivity: candidate.sensitivity.clone(),
+                expires_at,
+                ttl_days: candidate.ttl_days,
+            },
+        )?;
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE memory_candidates SET status = 'confirmed' WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(saved)
+    }
+
+    pub fn ignore_memory_candidate_record(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE memory_candidates SET status = 'ignored' WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_reminders(
+        &self,
+        contact_id: Option<&str>,
+        include_cancelled: bool,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ReminderCenterItem>> {
+        let conn = self.connection()?;
+        let mut sql = String::from(
+            "SELECT
+                r.id, r.memory_id, r.contact_id, r.kind, r.due_at, r.trigger_at,
+                r.reason, r.suggested_follow_up, r.source_memory_id, r.source_context_id,
+                r.cooldown_key, r.status, r.snooze_until, r.snooze_count, r.created_at, r.updated_at,
+                m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
+                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
+             FROM reminder r
+             JOIN memory_item m ON m.id = r.memory_id",
+        );
+        let mut filters = Vec::new();
+        if contact_id.filter(|id| !id.trim().is_empty()).is_some() {
+            filters.push("r.contact_id = ?1");
+        }
+        if !include_cancelled {
+            filters.push("r.status NOT IN ('cancelled', 'deleted')");
+        }
+        if !filters.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&filters.join(" AND "));
+        }
+        sql.push_str(" ORDER BY r.trigger_at ASC LIMIT ?");
+        let limit_index = if contact_id.filter(|id| !id.trim().is_empty()).is_some() {
+            2
+        } else {
+            1
+        };
+        sql.push_str(&limit_index.to_string());
+
+        let mut stmt = conn.prepare(&sql)?;
+        let map_row = |row: &Row<'_>| {
+            Ok(ReminderCenterItem {
+                reminder: reminder_from_row(row, 0)?,
+                memory_item: memory_from_joined_row(row, 16)?,
+            })
+        };
+        let rows = if let Some(contact_id) = contact_id.filter(|id| !id.trim().is_empty()) {
+            stmt.query_map(params![contact_id, limit as i64], map_row)?
+        } else {
+            stmt.query_map(params![limit as i64], map_row)?
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn complete_reminder(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE reminder SET status = 'completed', updated_at = ?2 WHERE id = ?1",
+            params![id, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn data_audit_report(
+        &self,
+        active_contact_id: &str,
+        retention_days: i64,
+    ) -> anyhow::Result<DataAuditReport> {
+        let conn = self.connection()?;
+        let table_names = [
+            "contacts",
+            "messages",
+            "message_events",
+            "memory_item",
+            "memory_candidates",
+            "reminder",
+            "reminder_mutes",
+            "context_summary",
+            "source_contexts",
+            "screenshot_analyses",
+            "suggestion_runs",
+            "contact_facts",
+            "reply_feedback",
+            "platform_signal_log",
+            "style_profile",
+        ];
+        let mut counts = Vec::new();
+        for table_name in table_names {
+            counts.push(DataAuditCount {
+                table_name: table_name.to_string(),
+                count: table_count(&conn, table_name)?,
+            });
+        }
+        Ok(DataAuditReport {
+            generated_at: now_rfc3339(),
+            active_contact_id: active_contact_id.to_string(),
+            counts,
+            contamination_findings: self.scan_for_test_artifacts()?,
+            retention_days,
+        })
+    }
+
+    pub fn export_data_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        let conn = self.connection()?;
+        Ok(serde_json::json!({
+            "exported_at": now_rfc3339(),
+            "contacts": query_json_rows(&conn, "SELECT id, alias, channel, is_allowlisted, created_at, updated_at FROM contacts ORDER BY updated_at DESC")?,
+            "contact_facts": query_json_rows(&conn, "SELECT id, contact_id, fact_type, value, normalized_value, source_note, fact_source, sensitivity, confidence, ttl_days, usage_policy, created_at, updated_at, last_used_at FROM contact_facts ORDER BY updated_at DESC")?,
+            "memories": query_json_rows(&conn, "SELECT id, contact_id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at FROM memory_item ORDER BY updated_at DESC")?,
+            "reminders": query_json_rows(&conn, "SELECT id, memory_id, contact_id, kind, due_at, trigger_at, reason, suggested_follow_up, source_context_id, cooldown_key, status, snooze_until, snooze_count, created_at, updated_at FROM reminder ORDER BY updated_at DESC")?,
+            "context_summaries": query_json_rows(&conn, "SELECT id, contact_id, source_kind, source_ref, summary, created_at FROM context_summary ORDER BY created_at DESC")?,
+            "source_contexts": query_json_rows(&conn, "SELECT id, contact_id, provider, input_kind, fact_source, source_label, source_excerpt, created_at, captured_at, visible_message_time, inferred_chat_time, source_confidence FROM source_contexts ORDER BY created_at DESC")?,
+            "suggestion_runs": query_json_rows(&conn, "SELECT id, contact_id, provider, input_kind, fact_source, source_context_id, output_summary, created_at, captured_at, visible_message_time, inferred_chat_time, source_confidence FROM suggestion_runs ORDER BY created_at DESC")?,
+        }))
+    }
+
+    pub fn clear_all_data(&self) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        for table in [
+            "reply_feedback",
+            "platform_signal_log",
+            "reminder_mutes",
+            "reminder",
+            "memory_candidates",
+            "memory_item",
+            "message_events",
+            "messages",
+            "context_summary",
+            "screenshot_analyses",
+            "suggestion_runs",
+            "source_contexts",
+            "contact_facts",
+            "contacts",
+            "style_profile",
+        ] {
+            conn.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        Ok(())
+    }
+
+    pub fn mute_reminders(
+        &self,
+        contact_id: Option<&str>,
+        kind: Option<&str>,
+        hours: i64,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let muted_until = to_rfc3339(Utc::now() + Duration::hours(hours.clamp(1, 24 * 365)));
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO reminder_mutes (id, contact_id, kind, muted_until, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                next_id("mute"),
+                contact_id.unwrap_or_default(),
+                kind.unwrap_or_default(),
+                muted_until,
+                truncate_chars(reason, 200),
+                now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn reminder_is_muted(
+        &self,
+        reminder: &ReminderRecord,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        let conn = self.connection()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(1)
+             FROM reminder_mutes
+             WHERE muted_until > ?1
+               AND (contact_id = '' OR contact_id = ?2)
+               AND (kind = '' OR kind = ?3)",
+            params![to_rfc3339(now), &reminder.contact_id, &reminder.kind],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn recent_notified_reminder_count(
+        &self,
+        contact_id: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<i64> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT COUNT(1)
+             FROM reminder
+             WHERE contact_id = ?1
+               AND status IN ('notified', 'completed')
+               AND updated_at >= ?2",
+            params![contact_id, to_rfc3339(since)],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn relationship_card(&self, contact_id: &str) -> anyhow::Result<RelationshipCard> {
+        let contact = self
+            .get_contact(contact_id)?
+            .ok_or_else(|| anyhow!("contact not found"))?;
+        let recent_messages = self.recent_messages(contact_id, 8)?;
+        let contact_facts = self.list_contact_facts(contact_id)?;
+        let memories = self.confirmed_memories_for_contact(contact_id, 8)?;
+        let pending_memory_candidates =
+            self.list_memory_candidates(contact_id, Some("candidate"), 8)?;
+        let reminders = self.list_reminders(Some(contact_id), false, 8)?;
+        let style_profile = self.style_profile()?;
+        let last_stop = recent_messages
+            .last()
+            .map(|message| {
+                format!(
+                    "{}：{}",
+                    message_capture_label_for_audit(message),
+                    truncate_chars(&message.text, 80)
+                )
+            })
+            .unwrap_or_else(|| "还没有本地上下文。".to_string());
+        let boundary_notes = contact_facts
+            .iter()
+            .filter(|fact| matches!(fact.fact_type.as_str(), "boundary"))
+            .map(|fact| fact.value.clone())
+            .collect::<Vec<_>>();
+        Ok(RelationshipCard {
+            contact,
+            recent_messages,
+            contact_facts,
+            memories,
+            pending_memory_candidates,
+            reminders,
+            style_profile,
+            interaction_cadence: "根据最近保存/采纳记录估计；信息不足时保持低压，不主动追问。"
+                .to_string(),
+            last_stop,
+            boundary_notes,
+        })
+    }
+
+    pub fn scan_for_test_artifacts(&self) -> anyhow::Result<Vec<DataContaminationFinding>> {
+        let conn = self.connection()?;
+        let mut findings = Vec::new();
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "contacts",
+            "id",
+            "id",
+            &["alias", "channel"],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "messages",
+            "id",
+            "contact_id",
+            &["role", "text", "source", "source_context_id"],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "message_events",
+            "id",
+            "contact_id",
+            &[
+                "message_id",
+                "role",
+                "text_excerpt",
+                "provider",
+                "input_kind",
+                "fact_source",
+                "source_context_id",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "memory_item",
+            "id",
+            "contact_id",
+            &[
+                "type",
+                "value",
+                "source_kind",
+                "source_ref",
+                "source_excerpt",
+                "fact_source",
+                "source_context_id",
+                "status",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "memory_candidates",
+            "id",
+            "contact_id",
+            &[
+                "suggestion_run_id",
+                "source_context_id",
+                "memory_type",
+                "value",
+                "source_kind",
+                "source_ref",
+                "source_excerpt",
+                "fact_source",
+                "status",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "context_summary",
+            "id",
+            "contact_id",
+            &["source_kind", "source_ref", "summary", "source_context_id"],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "platform_signal_log",
+            "id",
+            "contact_id",
+            &[
+                "contact_alias",
+                "channel",
+                "source",
+                "app_name",
+                "text_excerpt",
+                "reason",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "source_contexts",
+            "id",
+            "contact_id",
+            &[
+                "provider",
+                "input_kind",
+                "fact_source",
+                "source_label",
+                "source_excerpt",
+                "metadata_json",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "suggestion_runs",
+            "id",
+            "contact_id",
+            &[
+                "provider",
+                "input_kind",
+                "fact_source",
+                "source_context_id",
+                "context_sources_json",
+                "output_summary",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "reply_feedback",
+            "id",
+            "contact_id",
+            &[
+                "generation_id",
+                "suggestion_run_id",
+                "action",
+                "candidate_text",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "contact_facts",
+            "id",
+            "contact_id",
+            &[
+                "fact_type",
+                "value",
+                "normalized_value",
+                "source_note",
+                "provider",
+                "input_kind",
+                "fact_source",
+                "usage_policy",
+                "source_context_id",
+            ],
+        )?;
+        Ok(findings)
+    }
+
+    fn get_contact_fact_by_key(
+        &self,
+        contact_id: &str,
+        fact_type: &str,
+        normalized_value: &str,
+        fact_source: &str,
+    ) -> anyhow::Result<ContactFactRecord> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT id, contact_id, fact_type, value, normalized_value, source_note,
+                    provider, input_kind, fact_source, sensitivity, confidence, ttl_days,
+                    usage_policy, created_at, captured_at, visible_message_time,
+                    inferred_chat_time, source_confidence, updated_at, last_used_at
+             FROM contact_facts
+             WHERE contact_id = ?1 AND fact_type = ?2 AND normalized_value = ?3 AND fact_source = ?4
+             LIMIT 1",
+            params![contact_id, fact_type, normalized_value, fact_source],
+            contact_fact_from_row,
         )
         .map_err(Into::into)
     }
@@ -455,6 +1564,19 @@ impl MemoryRepository {
         contact_id: Option<&str>,
         summary: &ContextSummaryCandidate,
     ) -> anyhow::Result<ContextSummaryRecord> {
+        self.insert_context_summary_with_source(contact_id, summary, None, None, None, None, 0.0)
+    }
+
+    pub fn insert_context_summary_with_source(
+        &self,
+        contact_id: Option<&str>,
+        summary: &ContextSummaryCandidate,
+        source_context_id: Option<&str>,
+        captured_at: Option<&str>,
+        visible_message_time: Option<&str>,
+        inferred_chat_time: Option<&str>,
+        source_confidence: f64,
+    ) -> anyhow::Result<ContextSummaryRecord> {
         if summary.summary.trim().is_empty() {
             bail!("context summary is empty");
         }
@@ -470,15 +1592,22 @@ impl MemoryRepository {
 
         let conn = self.connection()?;
         conn.execute(
-            "INSERT INTO context_summary (id, contact_id, source_kind, source_ref, summary, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO context_summary
+                (id, contact_id, source_kind, source_ref, summary, created_at,
+                 source_context_id, captured_at, visible_message_time, inferred_chat_time, source_confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 &record.id,
                 &record.contact_id,
                 &record.source_kind,
                 &record.source_ref,
                 &record.summary,
-                &record.created_at
+                &record.created_at,
+                source_context_id.unwrap_or_default(),
+                captured_at.unwrap_or_default(),
+                visible_message_time.unwrap_or_default(),
+                inferred_chat_time.unwrap_or_default(),
+                source_confidence.clamp(0.0, 1.0)
             ],
         )?;
         Ok(record)
@@ -568,13 +1697,29 @@ impl MemoryRepository {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(&candidate.trigger_at),
         )?;
+        let kind = non_empty(&candidate.kind, "follow_up");
+        let cooldown_key = non_empty(
+            &candidate.cooldown_key,
+            &format!(
+                "{}:{}",
+                memory.contact_id,
+                non_empty(&candidate.memory_type, "event")
+            ),
+        );
         let reminder = ReminderRecord {
             id: next_id("rem"),
             memory_id: memory.id.clone(),
+            contact_id: memory.contact_id.clone(),
+            kind,
+            due_at: trigger_at.clone(),
             trigger_at,
             reason: candidate.reason.clone(),
             suggested_follow_up: candidate.suggested_follow_up.clone(),
+            source_memory_id: memory.id.clone(),
+            source_context_id: candidate.source_context_id.clone(),
+            cooldown_key,
             status: "scheduled".to_string(),
+            snooze_until: String::new(),
             snooze_count: 0,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
@@ -583,15 +1728,24 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute(
             "INSERT INTO reminder
-                (id, memory_id, trigger_at, reason, suggested_follow_up, status, snooze_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (id, memory_id, contact_id, kind, due_at, trigger_at, reason, suggested_follow_up,
+                 source_memory_id, source_context_id, cooldown_key, status, snooze_until,
+                 snooze_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 &reminder.id,
                 &reminder.memory_id,
+                &reminder.contact_id,
+                &reminder.kind,
+                &reminder.due_at,
                 &reminder.trigger_at,
                 &reminder.reason,
                 &reminder.suggested_follow_up,
+                &reminder.source_memory_id,
+                &reminder.source_context_id,
+                &reminder.cooldown_key,
                 &reminder.status,
+                &reminder.snooze_until,
                 reminder.snooze_count,
                 &reminder.created_at,
                 &reminder.updated_at
@@ -605,8 +1759,9 @@ impl MemoryRepository {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT
-                r.id, r.memory_id, r.trigger_at, r.reason, r.suggested_follow_up,
-                r.status, r.snooze_count, r.created_at, r.updated_at,
+                r.id, r.memory_id, r.contact_id, r.kind, r.due_at, r.trigger_at,
+                r.reason, r.suggested_follow_up, r.source_memory_id, r.source_context_id,
+                r.cooldown_key, r.status, r.snooze_until, r.snooze_count, r.created_at, r.updated_at,
                 m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
                 m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
              FROM reminder r
@@ -616,18 +1771,8 @@ impl MemoryRepository {
              LIMIT 5",
         )?;
         let rows = stmt.query_map(params![to_rfc3339(now)], |row| {
-            let reminder = ReminderRecord {
-                id: row.get(0)?,
-                memory_id: row.get(1)?,
-                trigger_at: row.get(2)?,
-                reason: row.get(3)?,
-                suggested_follow_up: row.get(4)?,
-                status: row.get(5)?,
-                snooze_count: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            };
-            let memory = memory_from_joined_row(row, 9)?;
+            let reminder = reminder_from_row(row, 0)?;
+            let memory = memory_from_joined_row(row, 16)?;
             Ok(build_reminder_detail(reminder, memory))
         })?;
 
@@ -638,8 +1783,9 @@ impl MemoryRepository {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT
-                r.id, r.memory_id, r.trigger_at, r.reason, r.suggested_follow_up,
-                r.status, r.snooze_count, r.created_at, r.updated_at,
+                r.id, r.memory_id, r.contact_id, r.kind, r.due_at, r.trigger_at,
+                r.reason, r.suggested_follow_up, r.source_memory_id, r.source_context_id,
+                r.cooldown_key, r.status, r.snooze_until, r.snooze_count, r.created_at, r.updated_at,
                 m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
                 m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
              FROM reminder r
@@ -649,18 +1795,8 @@ impl MemoryRepository {
              LIMIT 1",
         )?;
         stmt.query_row([], |row| {
-            let reminder = ReminderRecord {
-                id: row.get(0)?,
-                memory_id: row.get(1)?,
-                trigger_at: row.get(2)?,
-                reason: row.get(3)?,
-                suggested_follow_up: row.get(4)?,
-                status: row.get(5)?,
-                snooze_count: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            };
-            let memory = memory_from_joined_row(row, 9)?;
+            let reminder = reminder_from_row(row, 0)?;
+            let memory = memory_from_joined_row(row, 16)?;
             Ok(build_reminder_detail(reminder, memory))
         })
         .optional()
@@ -680,7 +1816,8 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute(
             "UPDATE reminder
-             SET trigger_at = ?2, snooze_count = snooze_count + 1, updated_at = ?3
+             SET trigger_at = ?2, due_at = ?2, snooze_until = ?2,
+                 status = 'scheduled', snooze_count = snooze_count + 1, updated_at = ?3
              WHERE id = ?1",
             params![id, to_rfc3339(trigger_at), now_rfc3339()],
         )?;
@@ -801,6 +1938,8 @@ fn build_reminder_detail(
         reminder.suggested_follow_up.clone()
     };
     let value = short_value(&memory_item.value);
+    let reminder_id = reminder.id.clone();
+    let memory_id = memory_item.id.clone();
     ReminderDetail {
         reminder,
         memory_item,
@@ -813,20 +1952,26 @@ fn build_reminder_detail(
         follow_up_candidates: vec![
             Candidate {
                 text: primary,
+                intent_group: "支持".to_string(),
                 style_tags: vec!["低压跟进".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec![reminder_id.clone(), memory_id.clone()],
                 reason: "直接使用创建提醒时的跟进建议".to_string(),
             },
             Candidate {
                 text: format!("刚想起你之前提到{}，还顺利吗？", value),
+                intent_group: "温柔".to_string(),
                 style_tags: vec!["自然关心".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec![reminder_id.clone(), memory_id.clone()],
                 reason: "轻轻提起来源，不逼对方展开".to_string(),
             },
             Candidate {
                 text: format!("如果你愿意说的话，{}现在怎么样了？", value),
+                intent_group: "收束".to_string(),
                 style_tags: vec!["尊重边界".to_string()],
                 risk_flags: vec!["none".to_string()],
+                source_refs: vec![reminder_id, memory_id],
                 reason: "给对方不回应或少说的空间".to_string(),
             },
         ],
@@ -834,6 +1979,9 @@ fn build_reminder_detail(
 }
 
 fn default_db_path() -> PathBuf {
+    if e2e_mock_provider_enabled() {
+        return e2e_profile_dir().join("echomate.db");
+    }
     if let Ok(appdata) = std::env::var("APPDATA") {
         return PathBuf::from(appdata).join("EchoMate").join("echomate.db");
     }
@@ -841,6 +1989,20 @@ fn default_db_path() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".echomate").join("echomate.db")
+}
+
+fn e2e_mock_provider_enabled() -> bool {
+    std::env::var("ECHOMATE_E2E_MOCK_PROVIDER")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn e2e_profile_dir() -> PathBuf {
+    std::env::var("ECHOMATE_E2E_PROFILE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join(format!("echomate-e2e-profile-{}", std::process::id()))
+        })
 }
 
 fn ensure_allowed_sensitivity(sensitivity: &str) -> anyhow::Result<()> {
@@ -945,11 +2107,227 @@ fn memory_from_joined_row(row: &Row<'_>, start: usize) -> rusqlite::Result<Memor
     })
 }
 
+fn reminder_from_row(row: &Row<'_>, start: usize) -> rusqlite::Result<ReminderRecord> {
+    Ok(ReminderRecord {
+        id: row.get(start)?,
+        memory_id: row.get(start + 1)?,
+        contact_id: row.get(start + 2)?,
+        kind: row.get(start + 3)?,
+        due_at: row.get(start + 4)?,
+        trigger_at: row.get(start + 5)?,
+        reason: row.get(start + 6)?,
+        suggested_follow_up: row.get(start + 7)?,
+        source_memory_id: row.get(start + 8)?,
+        source_context_id: row.get(start + 9)?,
+        cooldown_key: row.get(start + 10)?,
+        status: row.get(start + 11)?,
+        snooze_until: row.get(start + 12)?,
+        snooze_count: row.get(start + 13)?,
+        created_at: row.get(start + 14)?,
+        updated_at: row.get(start + 15)?,
+    })
+}
+
+struct SourceContextEventMeta {
+    provider: String,
+    input_kind: String,
+    fact_source: String,
+    captured_at: String,
+    visible_message_time: String,
+    inferred_chat_time: String,
+    source_confidence: f64,
+}
+
+fn source_context_event_meta(
+    conn: &Connection,
+    source_context_id: &str,
+) -> anyhow::Result<Option<SourceContextEventMeta>> {
+    conn.query_row(
+        "SELECT provider, input_kind, fact_source, captured_at, visible_message_time,
+                inferred_chat_time, source_confidence
+         FROM source_contexts
+         WHERE id = ?1
+         LIMIT 1",
+        params![source_context_id],
+        |row| {
+            Ok(SourceContextEventMeta {
+                provider: row.get(0)?,
+                input_kind: row.get(1)?,
+                fact_source: row.get(2)?,
+                captured_at: row.get(3)?,
+                visible_message_time: row.get(4)?,
+                inferred_chat_time: row.get(5)?,
+                source_confidence: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+const TEST_ARTIFACT_MARKERS: &[&str] = &[
+    "e2e",
+    "e2e-mock",
+    "mock",
+    "test contact",
+    "test_contact",
+    "测试联系人",
+];
+
+fn scan_table_for_test_artifacts(
+    conn: &Connection,
+    findings: &mut Vec<DataContaminationFinding>,
+    table_name: &str,
+    id_column: &str,
+    contact_column: &str,
+    fields: &[&str],
+) -> anyhow::Result<()> {
+    let selected_fields = fields.join(", ");
+    let sql = format!("SELECT {id_column}, {contact_column}, {selected_fields} FROM {table_name}",);
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        let record_id: String = row.get(0)?;
+        let contact_id: String = row.get(1)?;
+        let mut values = Vec::with_capacity(fields.len());
+        for (offset, field) in fields.iter().enumerate() {
+            let value: String = row.get(offset + 2)?;
+            values.push(((*field).to_string(), value));
+        }
+        Ok((record_id, contact_id, values))
+    })?;
+
+    for row in rows {
+        let (record_id, contact_id, values) = row?;
+        for (field_name, value) in values {
+            if let Some(marker) = test_artifact_marker(&value) {
+                findings.push(DataContaminationFinding {
+                    table_name: table_name.to_string(),
+                    record_id: record_id.clone(),
+                    contact_id: contact_id.clone(),
+                    field_name,
+                    matched_text: marker.to_string(),
+                    reason: "检测到 e2e/mock/test 标记，不能出现在真实联系人上下文。".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn test_artifact_marker(value: &str) -> Option<&'static str> {
+    let lower = value.to_lowercase();
+    TEST_ARTIFACT_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| lower.contains(&marker.to_lowercase()))
+}
+
+fn memory_candidate_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryCandidateRecord> {
+    Ok(MemoryCandidateRecord {
+        id: row.get(0)?,
+        contact_id: row.get(1)?,
+        suggestion_run_id: row.get(2)?,
+        source_context_id: row.get(3)?,
+        candidate_index: row.get(4)?,
+        memory_type: row.get(5)?,
+        summary: row.get(6)?,
+        value: row.get(7)?,
+        source_kind: row.get(8)?,
+        source_ref: row.get(9)?,
+        source_excerpt: row.get(10)?,
+        source_quote: row.get(11)?,
+        reason: row.get(12)?,
+        fact_source: row.get(13)?,
+        confidence: row.get(14)?,
+        sensitivity: row.get(15)?,
+        expires_at: row.get(16)?,
+        ttl_days: row.get(17)?,
+        status: row.get(18)?,
+        created_at: row.get(19)?,
+        captured_at: row.get(20)?,
+        visible_message_time: row.get(21)?,
+        inferred_chat_time: row.get(22)?,
+        source_confidence: row.get(23)?,
+    })
+}
+
+fn table_count(conn: &Connection, table_name: &str) -> anyhow::Result<i64> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table_name}"), [], |row| {
+        row.get(0)
+    })
+    .map_err(Into::into)
+}
+
+fn query_json_rows(conn: &Connection, sql: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(sql)?;
+    let columns = stmt
+        .column_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let rows = stmt.query_map([], |row| {
+        let mut object = serde_json::Map::new();
+        for (index, name) in columns.iter().enumerate() {
+            let value = match row.get_ref(index)? {
+                rusqlite::types::ValueRef::Null => serde_json::Value::Null,
+                rusqlite::types::ValueRef::Integer(value) => serde_json::json!(value),
+                rusqlite::types::ValueRef::Real(value) => serde_json::json!(value),
+                rusqlite::types::ValueRef::Text(value) => {
+                    serde_json::json!(String::from_utf8_lossy(value).to_string())
+                }
+                rusqlite::types::ValueRef::Blob(value) => {
+                    serde_json::json!(format!("<{} bytes>", value.len()))
+                }
+            };
+            object.insert(name.clone(), value);
+        }
+        Ok(serde_json::Value::Object(object))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn message_capture_label_for_audit(message: &MessageRecord) -> String {
+    format!("{} / {}", message.source, message.created_at)
+}
+
+fn contact_fact_from_row(row: &Row<'_>) -> rusqlite::Result<ContactFactRecord> {
+    Ok(ContactFactRecord {
+        id: row.get(0)?,
+        contact_id: row.get(1)?,
+        fact_type: row.get(2)?,
+        value: row.get(3)?,
+        normalized_value: row.get(4)?,
+        source_note: row.get(5)?,
+        provider: row.get(6)?,
+        input_kind: row.get(7)?,
+        fact_source: row.get(8)?,
+        sensitivity: row.get(9)?,
+        confidence: row.get(10)?,
+        ttl_days: row.get(11)?,
+        usage_policy: row.get(12)?,
+        created_at: row.get(13)?,
+        captured_at: row.get(14)?,
+        visible_message_time: row.get(15)?,
+        inferred_chat_time: row.get(16)?,
+        source_confidence: row.get(17)?,
+        updated_at: row.get(18)?,
+        last_used_at: row.get(19)?,
+    })
+}
+
 fn bool_to_i64(value: bool) -> i64 {
     if value {
         1
     } else {
         0
+    }
+}
+
+fn fallback_if_empty(value: String, fallback: String) -> String {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
     }
 }
 
@@ -1310,6 +2688,9 @@ fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn memory_repo_saves_memory_and_due_reminder() {
@@ -1319,13 +2700,17 @@ mod tests {
         let memory = repo
             .save_memory_candidate(&MemoryCandidate {
                 memory_type: "event".to_string(),
+                summary: "她明天面试".to_string(),
                 value: "她明天面试".to_string(),
                 source_kind: "clipboard".to_string(),
                 source_ref: "clipboard".to_string(),
                 source_excerpt: "我明天面试".to_string(),
+                source_quote: "我明天面试".to_string(),
+                reason: "明确事件".to_string(),
                 confidence: 0.88,
                 sensitivity: "normal".to_string(),
                 expires_at: String::new(),
+                ttl_days: None,
             })
             .expect("save memory");
         assert_eq!(memory.status, "confirmed");
@@ -1333,6 +2718,7 @@ mod tests {
         let detail = repo
             .create_reminder_from_candidate(
                 &ReminderCandidate {
+                    kind: "follow_up".to_string(),
                     memory_type: "event".to_string(),
                     memory_value: "她明天面试".to_string(),
                     source_kind: "clipboard".to_string(),
@@ -1342,6 +2728,8 @@ mod tests {
                     trigger_at: to_rfc3339(Utc::now() - Duration::seconds(1)),
                     reason: "面试后适合轻问结果".to_string(),
                     suggested_follow_up: "今天面试还顺利吗？".to_string(),
+                    source_context_id: String::new(),
+                    cooldown_key: "event:interview".to_string(),
                     confidence: 0.8,
                     sensitivity: "normal".to_string(),
                 },
@@ -1349,6 +2737,13 @@ mod tests {
             )
             .expect("create reminder");
         assert_eq!(detail.follow_up_candidates.len(), 3);
+        assert_eq!(detail.reminder.kind, "follow_up");
+        assert_eq!(detail.reminder.due_at, detail.reminder.trigger_at);
+        let reminders = repo
+            .list_reminders(None, false, 10)
+            .expect("list reminders");
+        assert_eq!(reminders.len(), 1);
+        assert_eq!(reminders[0].reminder.status, "scheduled");
 
         let due = repo.due_reminders(Utc::now()).expect("due reminders");
         assert_eq!(due.len(), 1);
@@ -1359,6 +2754,27 @@ mod tests {
             .due_reminders(Utc::now())
             .expect("due again")
             .is_empty());
+        repo.complete_reminder(&detail.reminder.id)
+            .expect("complete reminder");
+        let reminders = repo
+            .list_reminders(None, false, 10)
+            .expect("list reminders after complete");
+        assert_eq!(reminders[0].reminder.status, "completed");
+        let audit = repo.data_audit_report("", 30).expect("data audit report");
+        assert!(audit
+            .counts
+            .iter()
+            .any(|item| item.table_name == "reminder" && item.count == 1));
+        let exported = repo.export_data_snapshot().expect("export data");
+        assert!(exported
+            .get("reminders")
+            .and_then(|value| value.as_array())
+            .is_some());
+        repo.clear_all_data().expect("clear all data");
+        let audit_after_clear = repo
+            .data_audit_report("", 30)
+            .expect("data audit after clear");
+        assert!(audit_after_clear.counts.iter().all(|item| item.count == 0));
 
         let _ = std::fs::remove_file(path);
     }
@@ -1370,13 +2786,17 @@ mod tests {
         let err = repo
             .save_memory_candidate(&MemoryCandidate {
                 memory_type: "event".to_string(),
+                summary: "不该保存".to_string(),
                 value: "不该保存".to_string(),
                 source_kind: "clipboard".to_string(),
                 source_ref: String::new(),
                 source_excerpt: "secret".to_string(),
+                source_quote: "secret".to_string(),
+                reason: "敏感测试".to_string(),
                 confidence: 0.7,
                 sensitivity: "forbidden".to_string(),
                 expires_at: String::new(),
+                ttl_days: None,
             })
             .expect_err("forbidden should fail");
         assert!(err.to_string().contains("禁止保存"));
@@ -1391,14 +2811,14 @@ mod tests {
         let contact = repo
             .upsert_contact(&ContactInput {
                 id: None,
-                alias: "齐齐".to_string(),
+                alias: "测试联系人A".to_string(),
                 channel: "wechat".to_string(),
                 is_allowlisted: true,
             })
             .expect("upsert contact");
         assert!(contact.is_allowlisted);
         assert!(repo
-            .find_allowlisted_contact("齐齐", "wechat")
+            .find_allowlisted_contact("测试联系人A", "wechat")
             .expect("find contact")
             .is_some());
 
@@ -1441,19 +2861,199 @@ mod tests {
 
         let recent = repo.recent_messages(&contact.id, 10).expect("recent");
         assert_eq!(recent.len(), 2);
+        assert_eq!(
+            repo.message_event_count(&contact.id)
+                .expect("message event count"),
+            2
+        );
+
+        let source = repo
+            .insert_source_context(
+                &contact.id,
+                "codex",
+                "clipboard",
+                "clipboard",
+                "当前剪贴板文本",
+                "我明天面试，有点紧张",
+                Some("2026-06-09T08:00:00Z"),
+                None,
+                Some("unknown"),
+                0.6,
+                "{}",
+            )
+            .expect("insert source context");
+        let source_cards = repo
+            .recent_source_cards(&contact.id, 5)
+            .expect("recent source cards");
+        assert_eq!(source_cards.len(), 1);
+        assert_eq!(source_cards[0].source_kind, "clipboard");
+
+        let source_cards_for_run = source_cards.clone();
+        let run = repo
+            .record_suggestion_run(
+                &contact.id,
+                "codex",
+                "clipboard",
+                Some(&source.id),
+                &source_cards_for_run,
+                "对方提到明天面试。",
+            )
+            .expect("record suggestion run");
+        assert_eq!(run.fact_source, "clipboard");
+        assert_eq!(run.captured_at, "2026-06-09T08:00:00Z");
+        assert_eq!(run.inferred_chat_time, "unknown");
+        assert_eq!(run.source_confidence, 0.6);
+        assert_eq!(
+            repo.suggestion_run_count(&contact.id)
+                .expect("suggestion run count"),
+            1
+        );
+        let inserted_candidates = repo
+            .record_memory_candidates_for_run(
+                &contact.id,
+                &run.id,
+                Some(&source.id),
+                &[MemoryCandidate {
+                    memory_type: "event".to_string(),
+                    summary: "她明天有面试".to_string(),
+                    value: "她明天有面试".to_string(),
+                    source_kind: "clipboard".to_string(),
+                    source_ref: "current-request".to_string(),
+                    source_excerpt: "我明天面试".to_string(),
+                    source_quote: "我明天面试".to_string(),
+                    reason: "明确提到明天面试".to_string(),
+                    confidence: 0.86,
+                    sensitivity: "normal".to_string(),
+                    expires_at: String::new(),
+                    ttl_days: Some(7),
+                }],
+            )
+            .expect("record memory candidates");
+        assert_eq!(inserted_candidates, 1);
+        let inbox = repo
+            .list_memory_candidates(&contact.id, Some("candidate"), 10)
+            .expect("list memory candidate inbox");
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].reason, "明确提到明天面试");
+        let confirmed_from_inbox = repo
+            .confirm_memory_candidate(&inbox[0].id)
+            .expect("confirm memory candidate");
+        assert_eq!(confirmed_from_inbox.contact_id, contact.id);
+        assert!(repo
+            .list_memory_candidates(&contact.id, Some("candidate"), 10)
+            .expect("candidate inbox after confirm")
+            .is_empty());
+        assert_eq!(
+            repo.memory_candidate_count(&contact.id)
+                .expect("memory candidate count"),
+            1
+        );
+
+        let saved_facts = repo
+            .save_contact_facts(
+                &contact.id,
+                &[
+                    ContactFactCandidate {
+                        fact_type: "age_band".to_string(),
+                        value: "90 后".to_string(),
+                        normalized_value: "90s".to_string(),
+                        source_note: "联系人A 90 后，A 市人，在 B 市工作".to_string(),
+                        fact_source: "manual".to_string(),
+                        sensitivity: "normal".to_string(),
+                        confidence: 0.9,
+                        ttl_days: None,
+                        usage_policy: "contextual".to_string(),
+                    },
+                    ContactFactCandidate {
+                        fact_type: "hometown".to_string(),
+                        value: "A 市".to_string(),
+                        normalized_value: "A 市".to_string(),
+                        source_note: "联系人A 90 后，A 市人，在 B 市工作".to_string(),
+                        fact_source: "manual".to_string(),
+                        sensitivity: "normal".to_string(),
+                        confidence: 0.88,
+                        ttl_days: None,
+                        usage_policy: "contextual".to_string(),
+                    },
+                    ContactFactCandidate {
+                        fact_type: "temporary_state".to_string(),
+                        value: "最近健康状态不明".to_string(),
+                        normalized_value: "health-unknown".to_string(),
+                        source_note: "测试高敏过滤".to_string(),
+                        fact_source: "manual".to_string(),
+                        sensitivity: "high".to_string(),
+                        confidence: 0.7,
+                        ttl_days: Some(14),
+                        usage_policy: "rare".to_string(),
+                    },
+                ],
+            )
+            .expect("save contact facts");
+        assert_eq!(saved_facts.len(), 3);
+        assert_eq!(
+            repo.contact_fact_count(&contact.id)
+                .expect("contact fact count"),
+            3
+        );
+        assert_eq!(
+            repo.recent_messages(&contact.id, 10)
+                .expect("recent after manual facts")
+                .len(),
+            2,
+            "manual facts must not be written to messages"
+        );
+        let prompt_facts = repo
+            .prompt_contact_facts(&contact.id, 10)
+            .expect("prompt facts");
+        assert_eq!(prompt_facts.len(), 2);
+        assert!(prompt_facts.iter().all(|fact| fact.fact_source == "manual"));
+        repo.insert_screenshot_analysis(
+            &contact.id,
+            Some(&source.id),
+            "/tmp/echomate-fake-screenshot.png",
+            640,
+            960,
+            "test-ocr",
+            &ScreenshotAnalysis {
+                turns: vec![crate::domain::ScreenshotTurn {
+                    speaker: "other".to_string(),
+                    text: "我明天面试".to_string(),
+                    media_kind: "text".to_string(),
+                    visible_time_label: "昨天 22:53".to_string(),
+                    bbox: Some(crate::domain::BoundingBox {
+                        x: 0.1,
+                        y: 0.2,
+                        width: 0.4,
+                        height: 0.05,
+                    }),
+                    confidence: 0.9,
+                    warnings: Vec::new(),
+                }],
+                last_reply_target: "我明天面试".to_string(),
+                visible_time_label: "昨天 22:53".to_string(),
+                inferred_chat_time: "visible_time_label:昨天 22:53".to_string(),
+                staleness: "visible_time_only".to_string(),
+                warnings: Vec::new(),
+            },
+        )
+        .expect("insert screenshot analysis");
 
         let saved = repo
             .save_memory_candidate_for_contact(
                 Some(&contact.id),
                 &MemoryCandidate {
                     memory_type: "event".to_string(),
+                    summary: "她明天有面试".to_string(),
                     value: "她明天有面试".to_string(),
                     source_kind: "notification".to_string(),
                     source_ref: "toast".to_string(),
                     source_excerpt: "我明天面试".to_string(),
+                    source_quote: "我明天面试".to_string(),
+                    reason: "明确事件".to_string(),
                     confidence: 0.9,
                     sensitivity: "normal".to_string(),
                     expires_at: String::new(),
+                    ttl_days: None,
                 },
             )
             .expect("save scoped memory");
@@ -1462,8 +3062,21 @@ mod tests {
             repo.confirmed_memories_for_contact(&contact.id, 5)
                 .expect("memories")
                 .len(),
-            1
+            2
         );
+        let relationship = repo
+            .relationship_card(&contact.id)
+            .expect("relationship card");
+        assert_eq!(relationship.contact.id, contact.id);
+        assert!(!relationship.contact_facts.is_empty());
+        assert!(!relationship.memories.is_empty());
+        let audit = repo
+            .data_audit_report(&contact.id, 30)
+            .expect("audit with screenshot");
+        assert!(audit
+            .counts
+            .iter()
+            .any(|item| item.table_name == "screenshot_analyses" && item.count == 1));
 
         let profile = repo
             .update_style_profile_from_reply("明天面试顺利，别给自己太大压力。")
@@ -1497,11 +3110,119 @@ mod tests {
                 .expect("signal count after clear"),
             0
         );
+        assert_eq!(
+            repo.contact_fact_count(&contact.id)
+                .expect("fact count after clear"),
+            0
+        );
+        assert_eq!(
+            repo.message_event_count(&contact.id)
+                .expect("message event count after clear"),
+            0
+        );
+        assert_eq!(
+            repo.memory_candidate_count(&contact.id)
+                .expect("memory candidate count after clear"),
+            0
+        );
+        assert!(repo
+            .recent_source_cards(&contact.id, 10)
+            .expect("source cards after clear")
+            .is_empty());
+        assert_eq!(
+            repo.suggestion_run_count(&contact.id)
+                .expect("suggestion run count after clear"),
+            0
+        );
         assert!(repo
             .rebuild_style_profile_from_adopted_replies()
             .expect("empty style rebuild")
             .is_none());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn contamination_scanner_flags_test_artifacts_without_returning_full_text() {
+        let path = std::env::temp_dir().join(format!("echomate-test-{}.db", next_id("repo")));
+        let repo = MemoryRepository::new(path.clone()).expect("repo");
+
+        let contact = repo
+            .upsert_contact(&ContactInput {
+                id: None,
+                alias: "测试联系人A".to_string(),
+                channel: "wechat".to_string(),
+                is_allowlisted: true,
+            })
+            .expect("upsert contact");
+        let source = repo
+            .insert_source_context(
+                &contact.id,
+                "e2e-mock",
+                "clipboard",
+                "clipboard",
+                "E2E mock source",
+                "synthetic fixture text",
+                None,
+                None,
+                Some("unknown"),
+                0.5,
+                "{}",
+            )
+            .expect("insert mock source context");
+        repo.append_message_with_source_context(
+            &contact.id,
+            "other",
+            "synthetic fixture text",
+            "clipboard",
+            false,
+            Some(&source.id),
+            Some(&source.captured_at),
+            None,
+            Some("unknown"),
+            0.5,
+        )
+        .expect("append mock message");
+
+        let findings = repo.scan_for_test_artifacts().expect("scan test artifacts");
+        assert!(findings.iter().any(
+            |finding| finding.table_name == "contacts" && finding.matched_text == "测试联系人"
+        ));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.table_name == "source_contexts"
+                && matches!(finding.matched_text.as_str(), "e2e" | "mock" | "e2e-mock")));
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.matched_text != "synthetic fixture text"),
+            "scanner should report only the marker, not full stored text"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn e2e_mock_default_db_uses_temp_profile() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let old_mock = std::env::var("ECHOMATE_E2E_MOCK_PROVIDER").ok();
+        let old_profile = std::env::var("ECHOMATE_E2E_PROFILE_DIR").ok();
+        let profile =
+            std::env::temp_dir().join(format!("echomate-e2e-profile-test-{}", next_id("repo")));
+        std::env::set_var("ECHOMATE_E2E_MOCK_PROVIDER", "1");
+        std::env::set_var("ECHOMATE_E2E_PROFILE_DIR", &profile);
+
+        let path = default_db_path();
+        assert!(path.starts_with(&profile));
+        assert!(path.ends_with("echomate.db"));
+
+        match old_mock {
+            Some(value) => std::env::set_var("ECHOMATE_E2E_MOCK_PROVIDER", value),
+            None => std::env::remove_var("ECHOMATE_E2E_MOCK_PROVIDER"),
+        }
+        match old_profile {
+            Some(value) => std::env::set_var("ECHOMATE_E2E_PROFILE_DIR", value),
+            None => std::env::remove_var("ECHOMATE_E2E_PROFILE_DIR"),
+        }
     }
 }

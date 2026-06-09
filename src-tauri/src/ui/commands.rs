@@ -1,8 +1,10 @@
 use crate::agent::orchestrator::{AppConfig, OrchestratorState};
 use crate::domain::{
-    ContactInput, ContactRecord, MacosContextSnapshot, MemoryCandidate, MemoryItemRecord,
-    PermissionStatus, PlatformSignal, PlatformSignalResult, ReminderCandidate, ReminderDetail,
-    ReplyFeedbackRecord, StyleProfileRecord,
+    ContactFactCandidate, ContactFactClassification, ContactFactRecord, ContactInput,
+    ContactRecord, DataAuditReport, MacosContextSnapshot, MemoryCandidate, MemoryCandidateRecord,
+    MemoryItemRecord, PermissionStatus, PlatformSignal, PlatformSignalResult, PrivacyGuideStatus,
+    RelationshipCard, ReminderCandidate, ReminderCenterItem, ReminderDetail, ReplyFeedbackRecord,
+    StyleProfileRecord,
 };
 use crate::platform::macos_context::MacosContextHelper;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -31,8 +33,9 @@ pub async fn generate_replies_from_screenshot(
 pub async fn generate_topics(
     app: AppHandle,
     state: State<'_, OrchestratorState>,
+    topic_hint: Option<String>,
 ) -> Result<(), String> {
-    state.0.trigger_topics(&app).await.map(|_| ())
+    state.0.trigger_topics(&app, topic_hint).await.map(|_| ())
 }
 
 /// Return the latest generated candidate view so navigation back from settings can restore it.
@@ -174,6 +177,9 @@ pub async fn save_settings(
         if settings.active_contact_id.trim().is_empty() {
             settings.active_contact_id = config.active_contact_id.clone();
         }
+        if !settings.privacy_onboarding_completed {
+            settings.privacy_onboarding_completed = config.privacy_onboarding_completed;
+        }
         *config = settings;
     }
     state.0.clear_last_generation_view();
@@ -253,6 +259,72 @@ pub async fn ignore_reminder_candidate(
         .record_reply_feedback("ignore_reminder", candidate_index as i64)
 }
 
+/// List pending memory candidates persisted from previous provider runs.
+#[tauri::command]
+pub async fn list_memory_candidate_inbox(
+    state: State<'_, OrchestratorState>,
+    contact_id: Option<String>,
+) -> Result<Vec<MemoryCandidateRecord>, String> {
+    state.0.list_memory_candidate_inbox(contact_id)
+}
+
+/// Confirm one pending memory candidate and save it as long-term memory.
+#[tauri::command]
+pub async fn confirm_memory_candidate_record(
+    state: State<'_, OrchestratorState>,
+    id: String,
+) -> Result<MemoryItemRecord, String> {
+    state.0.confirm_memory_candidate_record(&id)
+}
+
+/// Ignore one pending memory candidate.
+#[tauri::command]
+pub async fn ignore_memory_candidate_record(
+    state: State<'_, OrchestratorState>,
+    id: String,
+) -> Result<(), String> {
+    state.0.ignore_memory_candidate_record(&id)
+}
+
+/// List scheduled/notified reminders for the active or selected contact.
+#[tauri::command]
+pub async fn list_reminders(
+    state: State<'_, OrchestratorState>,
+    contact_id: Option<String>,
+) -> Result<Vec<ReminderCenterItem>, String> {
+    state.0.list_reminders(contact_id)
+}
+
+/// Mark a reminder as completed.
+#[tauri::command]
+pub async fn complete_reminder(
+    state: State<'_, OrchestratorState>,
+    id: String,
+) -> Result<(), String> {
+    state.0.complete_reminder(&id)
+}
+
+/// Snooze a reminder by minutes.
+#[tauri::command]
+pub async fn snooze_reminder(
+    state: State<'_, OrchestratorState>,
+    id: String,
+    minutes: i64,
+) -> Result<(), String> {
+    state.0.snooze_reminder_minutes(&id, minutes)
+}
+
+/// Mute reminders by contact and/or reminder kind.
+#[tauri::command]
+pub async fn mute_reminders(
+    state: State<'_, OrchestratorState>,
+    contact_id: Option<String>,
+    kind: Option<String>,
+    hours: i64,
+) -> Result<(), String> {
+    state.0.mute_reminders(contact_id, kind, hours)
+}
+
 /// Soft-delete a confirmed memory item and cancel its reminders.
 #[tauri::command]
 pub async fn delete_memory(state: State<'_, OrchestratorState>, id: String) -> Result<(), String> {
@@ -292,6 +364,98 @@ pub async fn upsert_contact(
 ) -> Result<ContactRecord, String> {
     state.0.clear_last_generation_view();
     state.0.upsert_contact(contact)
+}
+
+/// Classify a user-entered contact note into structured manual facts.
+#[tauri::command]
+pub async fn classify_contact_facts(
+    state: State<'_, OrchestratorState>,
+    contact_id: String,
+    note: String,
+) -> Result<ContactFactClassification, String> {
+    state.0.classify_contact_facts(&contact_id, &note).await
+}
+
+/// Save user-approved manual facts for a contact.
+#[tauri::command]
+pub async fn save_contact_facts(
+    state: State<'_, OrchestratorState>,
+    contact_id: String,
+    facts: Vec<ContactFactCandidate>,
+) -> Result<Vec<ContactFactRecord>, String> {
+    state.0.clear_last_generation_view();
+    state.0.save_contact_facts(&contact_id, facts)
+}
+
+/// List saved manual/structured facts for a contact.
+#[tauri::command]
+pub async fn list_contact_facts(
+    state: State<'_, OrchestratorState>,
+    contact_id: String,
+) -> Result<Vec<ContactFactRecord>, String> {
+    state.0.list_contact_facts(&contact_id)
+}
+
+/// Return a single-contact relationship card.
+#[tauri::command]
+pub async fn get_relationship_card(
+    state: State<'_, OrchestratorState>,
+    contact_id: Option<String>,
+) -> Result<RelationshipCard, String> {
+    state.0.relationship_card(contact_id)
+}
+
+/// Return local data audit counts and contamination findings.
+#[tauri::command]
+pub async fn get_data_audit_report(
+    state: State<'_, OrchestratorState>,
+) -> Result<DataAuditReport, String> {
+    state.0.data_audit_report()
+}
+
+/// Export a local JSON snapshot through the controlled backend.
+#[tauri::command]
+pub async fn export_data_snapshot(
+    state: State<'_, OrchestratorState>,
+) -> Result<serde_json::Value, String> {
+    state.0.export_data_snapshot()
+}
+
+/// Clear all local EchoMate data.
+#[tauri::command]
+pub async fn clear_all_data(state: State<'_, OrchestratorState>) -> Result<(), String> {
+    state.0.clear_all_data()
+}
+
+/// Clear local EchoMate log files.
+#[tauri::command]
+pub async fn clear_logs(state: State<'_, OrchestratorState>) -> Result<(), String> {
+    state.0.clear_logs()
+}
+
+/// Return privacy guide status and data/log paths.
+#[tauri::command]
+pub async fn get_privacy_guide_status(
+    state: State<'_, OrchestratorState>,
+) -> Result<PrivacyGuideStatus, String> {
+    Ok(state.0.privacy_guide_status())
+}
+
+/// Mark the privacy guide as acknowledged.
+#[tauri::command]
+pub async fn acknowledge_privacy_guide(state: State<'_, OrchestratorState>) -> Result<(), String> {
+    state.0.acknowledge_privacy_guide();
+    Ok(())
+}
+
+/// Delete one saved contact fact.
+#[tauri::command]
+pub async fn delete_contact_fact(
+    state: State<'_, OrchestratorState>,
+    id: String,
+) -> Result<(), String> {
+    state.0.clear_last_generation_view();
+    state.0.delete_contact_fact(&id)
 }
 
 /// Delete a contact and clear its local context.

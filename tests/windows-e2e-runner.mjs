@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 
 const CDP_URL = process.env.ECHOMATE_CDP_URL || 'http://127.0.0.1:9222/json';
@@ -9,6 +10,18 @@ const OUT_DIR = process.env.ECHOMATE_E2E_OUT
 const E2E_HOTKEY = process.env.ECHOMATE_E2E_HOTKEY || '';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function assertTemporaryProfile() {
+  const appData = process.env.APPDATA || '';
+  const allowedRoot = process.env.ECHOMATE_E2E_PROFILE_DIR || os.tmpdir();
+  const resolvedAppData = path.resolve(appData).toLowerCase();
+  const resolvedAllowed = path.resolve(allowedRoot).toLowerCase();
+  if (!resolvedAppData || !resolvedAppData.startsWith(resolvedAllowed)) {
+    throw new Error(
+      `Refusing to run Windows e2e against a non-temporary profile. APPDATA=${appData || '(empty)'}; expected it under ${allowedRoot}. Launch EchoMate with temp APPDATA/ECHOMATE_E2E_PROFILE_DIR first.`
+    );
+  }
+}
 
 function getJson(url) {
   return new Promise((resolve, reject) => {
@@ -335,6 +348,7 @@ async function domSummary(send) {
 }
 
 async function main() {
+  assertTemporaryProfile();
   moveWindow();
   const { ws, send } = await connect();
   const hotkey = E2E_HOTKEY || configuredHotkey();
@@ -371,14 +385,14 @@ async function main() {
       }
     }))
     .then(() => window.__TAURI_INTERNALS__.invoke('upsert_contact', {
-      contact: { id: null, alias: '齐齐', channel: 'wechat', is_allowlisted: true }
+      contact: { id: null, alias: '测试联系人A', channel: 'wechat', is_allowlisted: true }
     }))
     .then((contact) => window.__TAURI_INTERNALS__.invoke('set_active_contact', { contactId: contact.id }))`);
 
   const beforeInboundCandidates = await evaluate(send, `window.__e2eCounts.candidates`);
   const inboundResult = await evaluate(send, `window.__TAURI_INTERNALS__.invoke('ingest_platform_signal', {
     signal: {
-      contact_alias: '齐齐',
+      contact_alias: '测试联系人A',
       channel: 'wechat',
       source: 'notification',
       text: '我明天面试，有点紧张',

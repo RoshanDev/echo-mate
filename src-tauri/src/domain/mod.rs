@@ -3,9 +3,15 @@ pub mod memory_item;
 pub mod message;
 
 pub use memory_item::{
-    ContactFact, ContactInput, ContactRecord, ContextPolicy, ContextSummaryCandidate,
-    ContextSummaryRecord, MacosContextSnapshot, MemoryCandidate, MemoryItemRecord, MessageRecord,
-    NextAction, PermissionStatus, PlatformSignal, PlatformSignalResult, ReminderCandidate,
-    ReminderDetail, ReminderRecord, ReplyFeedbackRecord, StyleProfile, StyleProfileRecord,
+    ContactFact, ContactFactCandidate, ContactFactClassification, ContactFactRecord, ContactInput,
+    ContactRecord, ContextPolicy, ContextSummaryCandidate, ContextSummaryRecord, DataAuditCount,
+    DataAuditReport, DataContaminationFinding, MacosContextSnapshot, MemoryCandidate,
+    MemoryCandidateRecord, MemoryItemRecord, MessageEventRecord, MessageRecord, NextAction,
+    PermissionStatus, PlatformSignal, PlatformSignalResult, PrivacyGuideStatus, RelationshipCard,
+    ReminderCandidate, ReminderCenterItem, ReminderDetail, ReminderRecord, ReplyFeedbackRecord,
+    SourceCard, SourceContextRecord, StyleProfile, StyleProfileRecord, SuggestionRunRecord,
 };
-pub use message::{Candidate, CandidateEnvelope, Message, SendEvent};
+pub use message::{
+    BoundingBox, Candidate, CandidateEnvelope, GenerationSituation, Message, ScreenshotAnalysis,
+    ScreenshotTurn, SendEvent,
+};

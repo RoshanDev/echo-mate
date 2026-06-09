@@ -1,15 +1,11 @@
-use crate::agent::orchestrator::{Orchestrator, OrchestratorState};
+use crate::agent::orchestrator::{log_dir_path, Orchestrator, OrchestratorState};
 use crate::ui;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize tracing subscriber — log to file + stderr
-    let log_dir = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(".echomate")
-        .join("logs");
+    let log_dir = log_dir_path();
     let _ = std::fs::create_dir_all(&log_dir);
     let file_appender = tracing_appender::rolling::daily(&log_dir, "echomate.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -29,7 +25,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .manage(OrchestratorState(orchestrator))
         .invoke_handler(tauri::generate_handler![
@@ -52,11 +47,29 @@ pub fn run() {
             ui::commands::create_reminder_from_candidate,
             ui::commands::ignore_memory_candidate,
             ui::commands::ignore_reminder_candidate,
+            ui::commands::list_memory_candidate_inbox,
+            ui::commands::confirm_memory_candidate_record,
+            ui::commands::ignore_memory_candidate_record,
+            ui::commands::list_reminders,
+            ui::commands::complete_reminder,
+            ui::commands::snooze_reminder,
+            ui::commands::mute_reminders,
             ui::commands::delete_memory,
             ui::commands::delete_reminder,
             ui::commands::get_latest_notified_reminder,
             ui::commands::list_contacts,
             ui::commands::upsert_contact,
+            ui::commands::classify_contact_facts,
+            ui::commands::save_contact_facts,
+            ui::commands::list_contact_facts,
+            ui::commands::get_relationship_card,
+            ui::commands::get_data_audit_report,
+            ui::commands::export_data_snapshot,
+            ui::commands::clear_all_data,
+            ui::commands::clear_logs,
+            ui::commands::get_privacy_guide_status,
+            ui::commands::acknowledge_privacy_guide,
+            ui::commands::delete_contact_fact,
             ui::commands::delete_contact,
             ui::commands::clear_contact_context,
             ui::commands::set_active_contact,

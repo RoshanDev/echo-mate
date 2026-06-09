@@ -134,6 +134,7 @@ function spawnTauriDev(homeDir) {
     RUSTUP_HOME: process.env.RUSTUP_HOME || path.join(ORIGINAL_HOME, '.rustup'),
     CARGO_HOME: process.env.CARGO_HOME || path.join(ORIGINAL_HOME, '.cargo'),
     ECHOMATE_E2E_MOCK_PROVIDER: '1',
+    ECHOMATE_E2E_PROFILE_DIR: path.join(homeDir, '.echomate-e2e'),
     RUST_LOG: process.env.RUST_LOG || 'info',
   };
   const child = spawn('npx', ['tauri', 'dev'], {
@@ -169,8 +170,12 @@ async function main() {
     throw new Error('macOS smoke runner must be run on macOS.');
   }
 
+  if (USE_RUNNING_APP) {
+    throw new Error('Refusing to run e2e against an already running EchoMate app. e2e must launch a dev app with a temporary HOME.');
+  }
+
   if (!USE_RUNNING_APP && echoMateRunning()) {
-    throw new Error('EchoMate is already running. Stop it first, or set ECHOMATE_E2E_USE_RUNNING=1 to test the running app.');
+    throw new Error('EchoMate is already running. Stop it first; e2e must use a temporary HOME and must not target the real profile.');
   }
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
