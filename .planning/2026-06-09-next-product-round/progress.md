@@ -68,9 +68,9 @@
 - [x] `node --check frontend/main.js && node --check frontend/settings.js && node --check tests/windows-e2e-runner.mjs && node --check tests/macos-smoke-runner.mjs`
 - [x] `rg` 检查 `src-tauri`、`frontend`、`tests` 中的真实式联系人/城市示例：无匹配。
 
-仍未完成：
+后续质量优化：
 
-- [ ] 截图内可见时间仍未做 OCR/结构化抽取，只记录 `visible_message_time`/`inferred_chat_time` 字段并在无法确定时标记 `unknown`。
+- [ ] 截图内可见时间已接入本地 OCR/可见标签启发式；后续继续提升结构化抽取准确率和跨平台质量。
 
 ## 2026-06-10 全 Phase 实施启动
 
@@ -87,7 +87,7 @@
 
 - 本次按同一计划目录继续推进 Phase 2-7。
 - 必须继续遵守真实 profile 隔离规则：不运行会碰真实 EchoMate profile 的 e2e/mock 流程；如需持久化测试必须使用临时目录。
-- Phase 1 只剩截图内可见时间/OCR 抽取这一项，和 Phase 2 截图理解 v2 合并处理。
+- Phase 1 截图内可见时间/OCR 抽取已并入 Phase 2 截图理解 v2 基础实现；后续只保留质量优化。
 
 ## 2026-06-10 Phase 2-7 第一批接线
 
@@ -154,9 +154,9 @@
 - [x] `node --check frontend/main.js && node --check frontend/settings.js && node --check tests/windows-e2e-runner.mjs && node --check tests/macos-smoke-runner.mjs`
 - [x] 真实式联系人/城市示例扫描 `src-tauri frontend tests`：无匹配。
 
-仍未完成：
+后续质量优化：
 
-- [ ] 截图内可见时间仍未做 OCR/结构化抽取，只记录 `visible_message_time`/`inferred_chat_time` 字段并在无法确定时标记 `unknown`。
+- [ ] 截图内可见时间已接入本地 OCR/可见标签启发式；后续继续提升结构化抽取准确率和跨平台质量。
 
 ## 2026-06-10 严格遗留项补齐
 
