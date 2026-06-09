@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupSettingsButtons();
   loadContacts();
   loadPermissionStatus();
+  loadStyleProfile();
 });
 
 async function loadSettings() {
@@ -148,6 +149,40 @@ function setupSettingsButtons() {
   });
 
   document.getElementById('btn-save-contact').addEventListener('click', saveContact);
+
+  document.getElementById('btn-refresh-style-profile').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-refresh-style-profile');
+    const status = document.getElementById('style-profile-status');
+    btn.disabled = true;
+    btn.textContent = '刷新中...';
+    status.textContent = '';
+    try {
+      const profile = await safeInvoke('refresh_style_profile');
+      renderStyleProfile(profile);
+      if (!profile) {
+        status.textContent = '没有可用的已采用回复。';
+      }
+    } catch (err) {
+      status.textContent = '刷新失败：' + String(err);
+      console.error('Failed to refresh style profile:', err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '刷新画像';
+    }
+  });
+
+  document.getElementById('btn-reset-style-profile').addEventListener('click', async () => {
+    if (!confirm('清空本地风格画像？')) return;
+    const status = document.getElementById('style-profile-status');
+    try {
+      await safeInvoke('reset_style_profile');
+      renderStyleProfile(null);
+      status.textContent = '已重置。';
+    } catch (err) {
+      status.textContent = '重置失败：' + String(err);
+      console.error('Failed to reset style profile:', err);
+    }
+  });
 }
 
 async function loadContacts() {
@@ -238,6 +273,73 @@ async function loadPermissionStatus() {
   } catch (err) {
     console.error('Failed to load permission status:', err);
   }
+}
+
+async function loadStyleProfile() {
+  try {
+    const profile = await safeInvoke('get_style_profile');
+    renderStyleProfile(profile);
+  } catch (err) {
+    document.getElementById('style-profile-status').textContent = '读取画像失败：' + String(err);
+    console.error('Failed to load style profile:', err);
+  }
+}
+
+function renderStyleProfile(profile) {
+  const summaryEl = document.getElementById('style-profile-summary');
+  const samplesEl = document.getElementById('style-profile-samples');
+  const avgEl = document.getElementById('style-profile-avg');
+  const updatedEl = document.getElementById('style-profile-updated');
+  const tagsEl = document.getElementById('style-profile-tags');
+  const statusEl = document.getElementById('style-profile-status');
+  tagsEl.innerHTML = '';
+  statusEl.textContent = '';
+
+  if (!profile) {
+    summaryEl.textContent = '暂无本地画像';
+    samplesEl.textContent = '0';
+    avgEl.textContent = '-';
+    updatedEl.textContent = '未生成';
+    return;
+  }
+
+  const payload = parseStyleProfileJson(profile.profile_json);
+  summaryEl.textContent = payload.summary || '本地画像已生成';
+  samplesEl.textContent = String(profile.sample_count || 0);
+  avgEl.textContent = typeof payload.avg_chars === 'number'
+    ? Math.round(payload.avg_chars) + ' 字'
+    : '-';
+  updatedEl.textContent = formatLocalTime(profile.updated_at);
+
+  const labels = Array.isArray(payload.tone_labels) ? payload.tone_labels : [];
+  labels.forEach((label) => {
+    const tag = document.createElement('span');
+    tag.className = 'style-tag';
+    tag.textContent = label;
+    tagsEl.appendChild(tag);
+  });
+}
+
+function parseStyleProfileJson(raw) {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn('Failed to parse style profile JSON:', err);
+    return { summary: raw };
+  }
+}
+
+function formatLocalTime(value) {
+  if (!value) return '未生成';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function escapeHtml(text) {

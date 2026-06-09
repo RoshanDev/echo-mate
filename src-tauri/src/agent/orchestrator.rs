@@ -4,7 +4,7 @@ use crate::agent::PromptComposer;
 use crate::domain::{
     Candidate, CandidateEnvelope, ContactInput, ContactRecord, ContextPolicy,
     ContextSummaryCandidate, ContextSummaryRecord, MemoryCandidate, NextAction, PermissionStatus,
-    PlatformSignal, PlatformSignalResult, ReminderCandidate,
+    PlatformSignal, PlatformSignalResult, ReminderCandidate, StyleProfileRecord,
 };
 use crate::platform::clipboard::{ClipboardImage, ClipboardManager};
 use crate::platform::hotkey::HotkeyManager;
@@ -1074,6 +1074,22 @@ impl Orchestrator {
     pub fn delete_context_summary(&self, id: &str) -> Result<(), String> {
         self.memory_repo
             .delete_context_summary(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn style_profile(&self) -> Result<Option<StyleProfileRecord>, String> {
+        self.memory_repo.style_profile().map_err(|e| e.to_string())
+    }
+
+    pub fn refresh_style_profile(&self) -> Result<Option<StyleProfileRecord>, String> {
+        self.memory_repo
+            .rebuild_style_profile_from_adopted_replies()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn reset_style_profile(&self) -> Result<(), String> {
+        self.memory_repo
+            .reset_style_profile()
             .map_err(|e| e.to_string())
     }
 

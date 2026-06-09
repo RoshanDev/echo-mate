@@ -16,6 +16,8 @@ pub struct MemoryRepository {
     db_path: PathBuf,
 }
 
+const STYLE_PROFILE_REBUILD_LIMIT: i64 = 200;
+
 impl MemoryRepository {
     pub fn open_default() -> anyhow::Result<Self> {
         Self::new(default_db_path())
@@ -315,29 +317,13 @@ impl MemoryRepository {
         if text.is_empty() {
             bail!("adopted reply is empty");
         }
-        let conn = self.connection()?;
         let existing = self.style_profile()?;
         let sample_count = existing
             .as_ref()
             .map(|profile| profile.sample_count + 1)
             .unwrap_or(1);
         let profile_json = build_style_profile_json(text, existing.as_ref(), sample_count)?;
-        let updated_at = now_rfc3339();
-        conn.execute(
-            "INSERT INTO style_profile (id, profile_json, sample_count, updated_at)
-             VALUES ('default', ?1, ?2, ?3)
-             ON CONFLICT(id) DO UPDATE SET
-                profile_json = excluded.profile_json,
-                sample_count = excluded.sample_count,
-                updated_at = excluded.updated_at",
-            params![&profile_json, sample_count, &updated_at],
-        )?;
-        Ok(StyleProfileRecord {
-            id: "default".to_string(),
-            profile_json,
-            sample_count,
-            updated_at,
-        })
+        self.write_style_profile(profile_json, sample_count)
     }
 
     pub fn style_profile(&self) -> anyhow::Result<Option<StyleProfileRecord>> {
@@ -358,6 +344,67 @@ impl MemoryRepository {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn rebuild_style_profile_from_adopted_replies(
+        &self,
+    ) -> anyhow::Result<Option<StyleProfileRecord>> {
+        let replies = self.adopted_reply_texts(STYLE_PROFILE_REBUILD_LIMIT)?;
+        if replies.is_empty() {
+            self.reset_style_profile()?;
+            return Ok(None);
+        }
+        let sample_count = replies.len() as i64;
+        let profile_json = build_style_profile_json_from_samples(&replies)?;
+        self.write_style_profile(profile_json, sample_count)
+            .map(Some)
+    }
+
+    pub fn reset_style_profile(&self) -> anyhow::Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM style_profile WHERE id = 'default'", [])?;
+        Ok(())
+    }
+
+    fn adopted_reply_texts(&self, limit: i64) -> anyhow::Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT text
+             FROM messages
+             WHERE role = 'me'
+               AND approved = 1
+               AND trim(text) <> ''
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        let mut replies = rows.collect::<Result<Vec<_>, _>>()?;
+        replies.reverse();
+        Ok(replies)
+    }
+
+    fn write_style_profile(
+        &self,
+        profile_json: String,
+        sample_count: i64,
+    ) -> anyhow::Result<StyleProfileRecord> {
+        let conn = self.connection()?;
+        let updated_at = now_rfc3339();
+        conn.execute(
+            "INSERT INTO style_profile (id, profile_json, sample_count, updated_at)
+             VALUES ('default', ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+                profile_json = excluded.profile_json,
+                sample_count = excluded.sample_count,
+                updated_at = excluded.updated_at",
+            params![&profile_json, sample_count, &updated_at],
+        )?;
+        Ok(StyleProfileRecord {
+            id: "default".to_string(),
+            profile_json,
+            sample_count,
+            updated_at,
+        })
     }
 
     pub fn apply_retention(&self, retention_days: i64) -> anyhow::Result<()> {
@@ -907,17 +954,8 @@ fn build_style_profile_json(
     } else {
         ((old_average * ((sample_count - 1) as f64)) + chars) / sample_count as f64
     };
-    let tone = if adopted_text.contains('？') || adopted_text.contains('?') {
-        "接话提问"
-    } else if adopted_text.chars().count() <= 22 {
-        "简短低压"
-    } else {
-        "温和解释"
-    };
-    let emoji_level = adopted_text
-        .chars()
-        .filter(|ch| !ch.is_ascii() && !('\u{4e00}'..='\u{9fff}').contains(ch))
-        .count();
+    let tone = detect_style_tone(adopted_text);
+    let emoji_level = count_style_emoji_marks(adopted_text);
     let summary = format!(
         "已采用 {sample_count} 条回复，平均约 {:.0} 字，最近偏向{}；只保存统计摘要，不保存无限原文样本。",
         avg_chars, tone
@@ -930,6 +968,49 @@ fn build_style_profile_json(
         "updated_from": "adopted_reply_summary"
     }))
     .map_err(Into::into)
+}
+
+fn build_style_profile_json_from_samples(samples: &[String]) -> anyhow::Result<String> {
+    if samples.is_empty() {
+        bail!("no adopted replies available for style profile");
+    }
+    let sample_count = samples.len() as i64;
+    let total_chars = samples
+        .iter()
+        .map(|sample| sample.chars().count())
+        .sum::<usize>() as f64;
+    let avg_chars = total_chars / sample_count as f64;
+    let latest = samples.last().map(String::as_str).unwrap_or_default();
+    let tone = detect_style_tone(latest);
+    let emoji_level = count_style_emoji_marks(latest);
+    let summary = format!(
+        "已采用 {sample_count} 条回复，平均约 {:.0} 字，最近偏向{}；只保存统计摘要，不保存无限原文样本。",
+        avg_chars, tone
+    );
+    serde_json::to_string(&serde_json::json!({
+        "summary": summary,
+        "avg_chars": avg_chars,
+        "tone_labels": [tone],
+        "emoji_marks_recent": emoji_level,
+        "updated_from": "adopted_reply_rebuild"
+    }))
+    .map_err(Into::into)
+}
+
+fn detect_style_tone(text: &str) -> &'static str {
+    if text.contains('？') || text.contains('?') {
+        "接话提问"
+    } else if text.chars().count() <= 22 {
+        "简短低压"
+    } else {
+        "温和解释"
+    }
+}
+
+fn count_style_emoji_marks(text: &str) -> usize {
+    text.chars()
+        .filter(|ch| !ch.is_ascii() && !('\u{4e00}'..='\u{9fff}').contains(ch))
+        .count()
 }
 
 #[cfg(test)]
@@ -1095,6 +1176,14 @@ mod tests {
             .expect("style profile");
         assert_eq!(profile.sample_count, 1);
         assert!(profile.profile_json.contains("summary"));
+        let rebuilt = repo
+            .rebuild_style_profile_from_adopted_replies()
+            .expect("rebuild style profile")
+            .expect("rebuilt profile");
+        assert_eq!(rebuilt.sample_count, 1);
+        assert!(rebuilt.profile_json.contains("adopted_reply_rebuild"));
+        repo.reset_style_profile().expect("reset style profile");
+        assert!(repo.style_profile().expect("profile after reset").is_none());
 
         repo.apply_retention(30).expect("retention");
         repo.clear_contact_context(&contact.id)
@@ -1108,6 +1197,10 @@ mod tests {
                 .expect("signal count after clear"),
             0
         );
+        assert!(repo
+            .rebuild_style_profile_from_adopted_replies()
+            .expect("empty style rebuild")
+            .is_none());
 
         let _ = std::fs::remove_file(path);
     }

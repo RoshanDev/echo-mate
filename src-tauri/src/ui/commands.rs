@@ -2,7 +2,7 @@ use crate::agent::orchestrator::{AppConfig, OrchestratorState};
 use crate::domain::{
     ContactInput, ContactRecord, MacosContextSnapshot, MemoryCandidate, MemoryItemRecord,
     PermissionStatus, PlatformSignal, PlatformSignalResult, ReminderCandidate, ReminderDetail,
-    ReplyFeedbackRecord,
+    ReplyFeedbackRecord, StyleProfileRecord,
 };
 use crate::platform::macos_context::MacosContextHelper;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -311,6 +311,28 @@ pub async fn delete_context_summary(
     id: String,
 ) -> Result<(), String> {
     state.0.delete_context_summary(&id)
+}
+
+/// Return the local style profile summary used for prompt context.
+#[tauri::command]
+pub async fn get_style_profile(
+    state: State<'_, OrchestratorState>,
+) -> Result<Option<StyleProfileRecord>, String> {
+    state.0.style_profile()
+}
+
+/// Rebuild the local style profile from adopted replies already saved on disk.
+#[tauri::command]
+pub async fn refresh_style_profile(
+    state: State<'_, OrchestratorState>,
+) -> Result<Option<StyleProfileRecord>, String> {
+    state.0.refresh_style_profile()
+}
+
+/// Clear the local style profile.
+#[tauri::command]
+pub async fn reset_style_profile(state: State<'_, OrchestratorState>) -> Result<(), String> {
+    state.0.reset_style_profile()
 }
 
 /// Return transparent platform permission/fallback state.
