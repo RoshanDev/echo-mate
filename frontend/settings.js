@@ -211,7 +211,7 @@ function renderContacts(contacts) {
       '</div>' +
       '<div class="contact-actions">' +
         '<button class="small-btn" data-action="edit">编辑</button>' +
-        '<button class="small-btn" data-action="clear">清空上下文</button>' +
+        '<button class="small-btn" data-action="clear">清空上下文和记忆</button>' +
         '<button class="small-btn danger" data-action="delete">删除</button>' +
       '</div>';
     list.appendChild(row);
@@ -224,7 +224,7 @@ function renderContacts(contacts) {
     });
     row.querySelector('[data-action="clear"]').addEventListener('click', async () => {
       await safeInvoke('clear_contact_context', { id: contact.id });
-      row.querySelector('.contact-meta').textContent = (contact.channel || 'wechat') + ' · 上下文已清空';
+      row.querySelector('.contact-meta').textContent = (contact.channel || 'wechat') + ' · 上下文和记忆已清空';
     });
     row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
       await safeInvoke('delete_contact', { id: contact.id });

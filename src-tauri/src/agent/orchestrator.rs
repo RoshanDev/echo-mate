@@ -3,8 +3,8 @@ use crate::agent::schema;
 use crate::agent::PromptComposer;
 use crate::domain::{
     Candidate, CandidateEnvelope, ContactInput, ContactRecord, ContextPolicy,
-    ContextSummaryCandidate, ContextSummaryRecord, MemoryCandidate, NextAction, PermissionStatus,
-    PlatformSignal, PlatformSignalResult, ReminderCandidate, StyleProfileRecord,
+    ContextSummaryCandidate, ContextSummaryRecord, NextAction, PermissionStatus, PlatformSignal,
+    PlatformSignalResult, StyleProfileRecord,
 };
 use crate::platform::clipboard::{ClipboardImage, ClipboardManager};
 use crate::platform::hotkey::HotkeyManager;
@@ -869,6 +869,12 @@ impl Orchestrator {
         mut envelope: CandidateEnvelope,
         context: &GenerationContext,
     ) -> CandidateEnvelope {
+        if e2e_mock_provider_enabled() || has_e2e_mock_artifacts(&envelope) {
+            envelope.memory_candidates.clear();
+            envelope.reminder_candidates.clear();
+            envelope.context_summary.summary.clear();
+            return envelope;
+        }
         if !context.policy.can_save_context {
             envelope.memory_candidates.clear();
             envelope.reminder_candidates.clear();
@@ -893,6 +899,10 @@ impl Orchestrator {
         context: &GenerationContext,
         incoming_text: Option<&str>,
     ) -> Option<ContextSummaryRecord> {
+        if e2e_mock_provider_enabled() || has_e2e_mock_artifacts(envelope) {
+            tracing::warn!("Skipped persistence for e2e mock generation artifacts");
+            return None;
+        }
         if !context.policy.can_save_context {
             return None;
         }
@@ -951,6 +961,9 @@ impl Orchestrator {
         &self,
         candidate: crate::domain::MemoryCandidate,
     ) -> Result<crate::domain::MemoryItemRecord, String> {
+        if e2e_mock_provider_enabled() || candidate.source_ref == "e2e-mock" {
+            return Err("测试 mock 记忆不允许保存到真实联系人上下文。".to_string());
+        }
         let context = self.generation_context(&self.config.lock().unwrap().clone());
         let contact_id = context
             .policy
@@ -969,6 +982,9 @@ impl Orchestrator {
         candidate: crate::domain::ReminderCandidate,
         trigger_at: Option<String>,
     ) -> Result<crate::domain::ReminderDetail, String> {
+        if e2e_mock_provider_enabled() || candidate.source_ref == "e2e-mock" {
+            return Err("测试 mock 提醒不允许保存到真实联系人上下文。".to_string());
+        }
         let context = self.generation_context(&self.config.lock().unwrap().clone());
         let contact_id = context
             .policy
@@ -1012,6 +1028,18 @@ impl Orchestrator {
         candidate_index: i64,
         candidate_text: &str,
     ) -> Result<crate::domain::ReplyFeedbackRecord, String> {
+        if e2e_mock_provider_enabled() {
+            return self
+                .memory_repo
+                .record_reply_feedback_for_contact(
+                    "current",
+                    action,
+                    candidate_index,
+                    candidate_text,
+                    None,
+                )
+                .map_err(|e| e.to_string());
+        }
         let context = self.generation_context(&self.config.lock().unwrap().clone());
         let contact_id = context
             .policy
@@ -1097,7 +1125,21 @@ impl Orchestrator {
     }
 
     pub fn last_generation_view(&self) -> Option<serde_json::Value> {
-        self.last_generation_view.lock().unwrap().clone()
+        let snapshot = self.last_generation_view.lock().unwrap().clone()?;
+        let snapshot_contact_id = snapshot
+            .get("context_policy")
+            .and_then(|policy| policy.get("contact_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let active_contact_id = self.config.lock().unwrap().active_contact_id.clone();
+        if snapshot_contact_id != active_contact_id {
+            return None;
+        }
+        Some(snapshot)
+    }
+
+    pub fn clear_last_generation_view(&self) {
+        *self.last_generation_view.lock().unwrap() = None;
     }
 
     pub fn set_active_contact(&self, contact_id: String) -> Result<(), String> {
@@ -1615,6 +1657,18 @@ fn e2e_mock_provider_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn has_e2e_mock_artifacts(envelope: &CandidateEnvelope) -> bool {
+    envelope.context_summary.source_ref == "e2e-mock"
+        || envelope
+            .memory_candidates
+            .iter()
+            .any(|candidate| candidate.source_ref == "e2e-mock")
+        || envelope
+            .reminder_candidates
+            .iter()
+            .any(|candidate| candidate.source_ref == "e2e-mock")
+}
+
 fn e2e_skip_screenclip_enabled() -> bool {
     std::env::var("ECHOMATE_E2E_SKIP_SCREENCLIP")
         .map(|value| value == "1")
@@ -1634,7 +1688,6 @@ fn e2e_disable_cooldown_enabled() -> bool {
 }
 
 fn mock_e2e_envelope(source_kind: &str) -> CandidateEnvelope {
-    let trigger_at = (Utc::now() - ChronoDuration::seconds(5)).to_rfc3339();
     CandidateEnvelope {
         candidates: vec![
             Candidate {
@@ -1673,29 +1726,8 @@ fn mock_e2e_envelope(source_kind: &str) -> CandidateEnvelope {
             reason: "她明确提到明天面试，适合轻鼓励后收束，不继续追问。".to_string(),
             confidence: 0.86,
         },
-        memory_candidates: vec![MemoryCandidate {
-            memory_type: "event".to_string(),
-            value: "她明天有面试".to_string(),
-            source_kind: source_kind.to_string(),
-            source_ref: "e2e-mock".to_string(),
-            source_excerpt: "我明天面试".to_string(),
-            confidence: 0.9,
-            sensitivity: "normal".to_string(),
-            expires_at: String::new(),
-        }],
-        reminder_candidates: vec![ReminderCandidate {
-            memory_type: "event".to_string(),
-            memory_value: "她明天有面试".to_string(),
-            source_kind: source_kind.to_string(),
-            source_ref: "e2e-mock".to_string(),
-            source_excerpt: "我明天面试".to_string(),
-            recommended_time: "面试后".to_string(),
-            trigger_at,
-            reason: "面试后适合轻问结果。".to_string(),
-            suggested_follow_up: "今天面试还顺利吗？".to_string(),
-            confidence: 0.86,
-            sensitivity: "normal".to_string(),
-        }],
+        memory_candidates: Vec::new(),
+        reminder_candidates: Vec::new(),
         context_summary: ContextSummaryCandidate {
             source_kind: source_kind.to_string(),
             source_ref: "e2e-mock".to_string(),

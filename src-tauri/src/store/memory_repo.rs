@@ -177,12 +177,26 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute("DELETE FROM messages WHERE contact_id = ?1", params![id])?;
         conn.execute(
+            "DELETE FROM reply_feedback WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
             "DELETE FROM platform_signal_log WHERE contact_id = ?1",
             params![id],
         )?;
         conn.execute(
             "DELETE FROM context_summary WHERE contact_id = ?1",
             params![id],
+        )?;
+        conn.execute(
+            "UPDATE memory_item SET status = 'deleted', updated_at = ?2 WHERE contact_id = ?1",
+            params![id, now_rfc3339()],
+        )?;
+        conn.execute(
+            "UPDATE reminder
+             SET status = 'cancelled', updated_at = ?2
+             WHERE memory_id IN (SELECT id FROM memory_item WHERE contact_id = ?1)",
+            params![id, now_rfc3339()],
         )?;
         Ok(())
     }
@@ -1472,6 +1486,12 @@ mod tests {
             .recent_messages(&contact.id, 10)
             .expect("recent after clear")
             .is_empty());
+        assert_eq!(
+            repo.confirmed_memories_for_contact(&contact.id, 5)
+                .expect("memories after clear")
+                .len(),
+            0
+        );
         assert_eq!(
             repo.platform_signal_log_count(&contact.id)
                 .expect("signal count after clear"),

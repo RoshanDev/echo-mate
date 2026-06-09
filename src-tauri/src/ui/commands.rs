@@ -167,12 +167,16 @@ pub async fn get_settings(state: State<'_, OrchestratorState>) -> Result<AppConf
 pub async fn save_settings(
     app: AppHandle,
     state: State<'_, OrchestratorState>,
-    settings: AppConfig,
+    mut settings: AppConfig,
 ) -> Result<(), String> {
     {
         let mut config = state.0.config.lock().unwrap();
+        if settings.active_contact_id.trim().is_empty() {
+            settings.active_contact_id = config.active_contact_id.clone();
+        }
         *config = settings;
     }
+    state.0.clear_last_generation_view();
     state.0.reload_hotkey(&app);
     state.0.save_config_to_disk();
     tracing::info!("Settings saved");
@@ -189,6 +193,7 @@ pub async fn reset_settings(
         let mut config = state.0.config.lock().unwrap();
         *config = AppConfig::default();
     }
+    state.0.clear_last_generation_view();
     state.0.reload_hotkey(&app);
     state.0.save_config_to_disk();
     tracing::info!("Settings reset to defaults");
@@ -285,12 +290,14 @@ pub async fn upsert_contact(
     state: State<'_, OrchestratorState>,
     contact: ContactInput,
 ) -> Result<ContactRecord, String> {
+    state.0.clear_last_generation_view();
     state.0.upsert_contact(contact)
 }
 
 /// Delete a contact and clear its local context.
 #[tauri::command]
 pub async fn delete_contact(state: State<'_, OrchestratorState>, id: String) -> Result<(), String> {
+    state.0.clear_last_generation_view();
     state.0.delete_contact(&id)
 }
 
@@ -300,6 +307,7 @@ pub async fn clear_contact_context(
     state: State<'_, OrchestratorState>,
     id: String,
 ) -> Result<(), String> {
+    state.0.clear_last_generation_view();
     state.0.clear_contact_context(&id)
 }
 
@@ -309,6 +317,7 @@ pub async fn set_active_contact(
     state: State<'_, OrchestratorState>,
     contact_id: String,
 ) -> Result<(), String> {
+    state.0.clear_last_generation_view();
     state.0.set_active_contact(contact_id)
 }
 
@@ -318,6 +327,7 @@ pub async fn delete_context_summary(
     state: State<'_, OrchestratorState>,
     id: String,
 ) -> Result<(), String> {
+    state.0.clear_last_generation_view();
     state.0.delete_context_summary(&id)
 }
 
