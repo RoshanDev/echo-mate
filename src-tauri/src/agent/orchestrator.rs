@@ -105,6 +105,7 @@ pub struct Orchestrator {
     schema_dir: PathBuf,
     generation_in_progress: AtomicBool,
     last_generation_input: Mutex<Option<GenerationInput>>,
+    last_generation_view: Mutex<Option<serde_json::Value>>,
 }
 
 impl Orchestrator {
@@ -135,6 +136,7 @@ impl Orchestrator {
             schema_dir,
             generation_in_progress: AtomicBool::new(false),
             last_generation_input: Mutex::new(None),
+            last_generation_view: Mutex::new(None),
         }
     }
 
@@ -511,20 +513,19 @@ impl Orchestrator {
         if let Err(errs) = self.parser.validate(envelope) {
             tracing::warn!("Validation warnings: {:?}", errs);
         }
-        let _ = app.emit(
-            "candidates-ready",
-            serde_json::json!({
-                "candidates": &envelope.candidates,
-                "action_card": &envelope.action_card,
-                "memory_candidates": &envelope.memory_candidates,
-                "reminder_candidates": &envelope.reminder_candidates,
-                "context_summary": &envelope.context_summary,
-                "context_policy": policy,
-                "context_record": context_record,
-                "provider": provider,
-                "mode": mode,
-            }),
-        );
+        let payload = serde_json::json!({
+            "candidates": &envelope.candidates,
+            "action_card": &envelope.action_card,
+            "memory_candidates": &envelope.memory_candidates,
+            "reminder_candidates": &envelope.reminder_candidates,
+            "context_summary": &envelope.context_summary,
+            "context_policy": policy,
+            "context_record": context_record,
+            "provider": provider,
+            "mode": mode,
+        });
+        *self.last_generation_view.lock().unwrap() = Some(payload.clone());
+        let _ = app.emit("candidates-ready", payload);
         self.window.show_popup(app);
     }
 
@@ -726,6 +727,7 @@ impl Orchestrator {
     }
 
     fn emit_generation_started(&self, app: &AppHandle, source: &str, length: Option<usize>) {
+        *self.last_generation_view.lock().unwrap() = None;
         let _ = app.emit(
             "generation-started",
             serde_json::json!({
@@ -1092,6 +1094,10 @@ impl Orchestrator {
         self.memory_repo
             .reset_style_profile()
             .map_err(|e| e.to_string())
+    }
+
+    pub fn last_generation_view(&self) -> Option<serde_json::Value> {
+        self.last_generation_view.lock().unwrap().clone()
     }
 
     pub fn set_active_contact(&self, contact_id: String) -> Result<(), String> {

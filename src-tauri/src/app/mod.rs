@@ -36,6 +36,7 @@ pub fn run() {
             ui::commands::generate_replies,
             ui::commands::generate_replies_from_screenshot,
             ui::commands::generate_topics,
+            ui::commands::get_last_generation_view,
             ui::commands::regenerate_candidates,
             ui::commands::regenerate_with_style,
             ui::commands::record_copy,

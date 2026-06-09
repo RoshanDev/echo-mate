@@ -51,6 +51,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setupButtons();
   loadContacts();
+  recoverLastGenerationView();
   recoverReminderPanel();
 });
 
@@ -531,6 +532,18 @@ async function recoverReminderPanel() {
     if (detail) renderReminderPanel(detail);
   } catch (err) {
     console.error('Recover reminder panel failed:', err);
+  }
+}
+
+async function recoverLastGenerationView() {
+  try {
+    const snapshot = await safeInvoke('get_last_generation_view');
+    if (!snapshot || !Array.isArray(snapshot.candidates) || snapshot.candidates.length === 0) {
+      return;
+    }
+    handleCandidatesReady({ payload: snapshot });
+  } catch (err) {
+    console.error('Recover last generation view failed:', err);
   }
 }
 

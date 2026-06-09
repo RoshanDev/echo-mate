@@ -35,6 +35,14 @@ pub async fn generate_topics(
     state.0.trigger_topics(&app).await.map(|_| ())
 }
 
+/// Return the latest generated candidate view so navigation back from settings can restore it.
+#[tauri::command]
+pub async fn get_last_generation_view(
+    state: State<'_, OrchestratorState>,
+) -> Result<Option<serde_json::Value>, String> {
+    Ok(state.0.last_generation_view())
+}
+
 /// Regenerate with a style modifier
 #[tauri::command]
 pub async fn regenerate_candidates(
