@@ -4,10 +4,10 @@ use crate::agent::PromptComposer;
 use crate::domain::{
     BoundingBox, Candidate, CandidateEnvelope, ContactFactCandidate, ContactFactClassification,
     ContactFactRecord, ContactInput, ContactRecord, ContextPolicy, ContextSummaryCandidate,
-    ContextSummaryRecord, DataAuditReport, MemoryCandidateRecord, MemoryItemRecord, NextAction,
-    PermissionStatus, PlatformSignal, PlatformSignalResult, PrivacyGuideStatus, RelationshipCard,
-    ReminderCenterItem, ScreenshotAnalysis, ScreenshotTurn, SourceCard, SourceContextRecord,
-    StyleProfileRecord, SuggestionRunRecord,
+    ContextSummaryRecord, DataAuditReport, EditedMemoryCandidate, MemoryCandidateRecord,
+    MemoryItemRecord, NextAction, PermissionStatus, PlatformSignal, PlatformSignalResult,
+    PrivacyGuideStatus, RelationshipCard, ReminderCenterItem, ScreenshotAnalysis, ScreenshotTurn,
+    SourceCard, SourceContextRecord, StyleProfileRecord, SuggestionRunRecord,
 };
 use crate::platform::clipboard::{ClipboardImage, ClipboardManager};
 use crate::platform::hotkey::HotkeyManager;
@@ -23,7 +23,7 @@ use image::{ImageBuffer, ImageFormat, Rgba};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -118,6 +118,7 @@ pub struct Orchestrator {
     generation_in_progress: AtomicBool,
     last_generation_input: Mutex<Option<GenerationInput>>,
     last_generation_view: Mutex<Option<serde_json::Value>>,
+    screenshot_batch: Mutex<Vec<ScreenshotInput>>,
 }
 
 impl Orchestrator {
@@ -149,6 +150,7 @@ impl Orchestrator {
             generation_in_progress: AtomicBool::new(false),
             last_generation_input: Mutex::new(None),
             last_generation_view: Mutex::new(None),
+            screenshot_batch: Mutex::new(Vec::new()),
         }
     }
 
@@ -263,6 +265,69 @@ impl Orchestrator {
             .await
     }
 
+    pub async fn add_screenshot_to_batch(
+        &self,
+        app: &AppHandle,
+    ) -> Result<ScreenshotBatchStatus, String> {
+        self.emit_screenshot_batch_status(app);
+        let screenshot = match self.capture_chat_screenshot(app).await {
+            Ok(screenshot) => screenshot,
+            Err(e) => {
+                self.emit_generation_error(app, &e);
+                return Err(e);
+            }
+        };
+        let status = {
+            let mut batch = self.screenshot_batch.lock().unwrap();
+            if batch.len() >= 6 {
+                batch.remove(0);
+            }
+            batch.push(screenshot);
+            screenshot_batch_status(&batch)
+        };
+        self.emit_screenshot_batch_status(app);
+        self.window.show_popup(app);
+        Ok(status)
+    }
+
+    pub fn clear_screenshot_batch(&self, app: &AppHandle) -> ScreenshotBatchStatus {
+        let status = {
+            let mut batch = self.screenshot_batch.lock().unwrap();
+            batch.clear();
+            screenshot_batch_status(&batch)
+        };
+        let _ = app.emit("screenshot-batch-updated", &status);
+        status
+    }
+
+    pub async fn trigger_from_screenshot_batch(
+        &self,
+        app: &AppHandle,
+    ) -> Result<CandidateEnvelope, String> {
+        let screenshots = {
+            let batch = self.screenshot_batch.lock().unwrap();
+            batch.clone()
+        };
+        if screenshots.is_empty() {
+            return Err("多截图批次为空。".to_string());
+        }
+        let result = self
+            .generate_with_guard(app, GenerationInput::ScreenshotBatch(screenshots))
+            .await;
+        if result.is_ok() {
+            self.clear_screenshot_batch(app);
+        }
+        result
+    }
+
+    fn emit_screenshot_batch_status(&self, app: &AppHandle) {
+        let status = {
+            let batch = self.screenshot_batch.lock().unwrap();
+            screenshot_batch_status(&batch)
+        };
+        let _ = app.emit("screenshot-batch-updated", &status);
+    }
+
     async fn trigger_auto(
         &self,
         app: &AppHandle,
@@ -314,6 +379,10 @@ impl Orchestrator {
             GenerationInput::Text(text) => self.generate_from_text(app, text, input).await,
             GenerationInput::Screenshot(screenshot) => {
                 self.generate_from_screenshot_input(app, screenshot, input)
+                    .await
+            }
+            GenerationInput::ScreenshotBatch(screenshots) => {
+                self.generate_from_screenshot_batch_input(app, screenshots, input)
                     .await
             }
             GenerationInput::Topic(topic_hint) => {
@@ -432,8 +501,13 @@ impl Orchestrator {
         let result = if e2e_mock_provider_enabled() {
             Ok((mock_e2e_envelope("screenshot"), "e2e-mock".to_string()))
         } else {
-            self.call_screenshot_provider(&config, &full_prompt, &schema_path, &screenshot.path)
-                .await
+            self.call_screenshot_provider_with_images(
+                &config,
+                &full_prompt,
+                &schema_path,
+                &[screenshot.path.clone()],
+            )
+            .await
         };
 
         match result {
@@ -480,6 +554,126 @@ impl Orchestrator {
                     &envelope,
                     &provider,
                     "screenshot",
+                    &generation_context.policy,
+                    persisted.context_record.as_ref(),
+                    &source_cards,
+                    persisted.suggestion_run.as_ref(),
+                );
+                self.remember_generation_input(input);
+                Ok(envelope)
+            }
+            Err(e) => {
+                self.emit_generation_error(app, &e);
+                Err(e)
+            }
+        }
+    }
+
+    async fn generate_from_screenshot_batch_input(
+        &self,
+        app: &AppHandle,
+        screenshots: Vec<ScreenshotInput>,
+        input: GenerationInput,
+    ) -> Result<CandidateEnvelope, String> {
+        if screenshots.is_empty() {
+            return Err("多截图批次为空。".to_string());
+        }
+        tracing::info!("Screenshot batch ready: {} images", screenshots.len());
+        self.emit_generation_started(app, "screenshot", None);
+
+        let config = self.config.lock().unwrap().clone();
+        let generation_context = self.generation_context(&config);
+        let local_screenshot_analysis = analyze_screenshot_batch_locally(&screenshots);
+        let (image_width, image_height) = screenshot_batch_dimensions(&screenshots);
+        let system_prompt = self.prompt_composer.system_prompt();
+        let mut task_prompt = self.prompt_composer.screenshot_task_prompt(
+            image_width,
+            image_height,
+            &local_screenshot_analysis,
+            &generation_context.context_block,
+            &config.tone,
+            &config.length,
+            config.emoji_level,
+            config.humor_level,
+        );
+        task_prompt.push_str(&format!(
+            r#"
+
+多截图拼接规则：
+- 随附 {count} 张聊天截图，顺序就是用户添加/选择顺序。
+- 请按这个顺序把 turns 拼接成同一段上下文；相邻截图之间如果内容不连续、时间标签跳变或可能漏消息，必须在 screenshot_analysis.warnings 里说明。
+- 如果后图和前图有重复区域，去重后保留更清晰的一份；不要把重复消息当成对方说了两次。
+- 如果跨图时间断点无法确定，staleness 使用 visible_time_only 或 unknown，候选回复保持低压。"#,
+            count = screenshots.len()
+        ));
+        let full_prompt = format!("{}\n\n---\n\n{}", system_prompt, task_prompt);
+
+        let (schema_path, _schema_json) = self.write_schema().await?;
+        let image_paths = screenshots
+            .iter()
+            .map(|screenshot| screenshot.path.clone())
+            .collect::<Vec<_>>();
+        let result = if e2e_mock_provider_enabled() {
+            Ok((mock_e2e_envelope("screenshot"), "e2e-mock".to_string()))
+        } else {
+            self.call_screenshot_provider_with_images(
+                &config,
+                &full_prompt,
+                &schema_path,
+                &image_paths,
+            )
+            .await
+        };
+
+        match result {
+            Ok((envelope, provider)) => {
+                let mut envelope = self.apply_context_policy(envelope, &generation_context);
+                envelope.screenshot_analysis = merge_screenshot_analysis(
+                    local_screenshot_analysis,
+                    envelope.screenshot_analysis,
+                );
+                let persisted = self.persist_generation_artifacts(
+                    &envelope,
+                    "screenshot",
+                    &provider,
+                    &generation_context,
+                    None,
+                    Some(&envelope.screenshot_analysis),
+                );
+                if let (Some(contact), Some(source_context)) = (
+                    generation_context.contact.as_ref(),
+                    persisted.source_context.as_ref(),
+                ) {
+                    let joined_paths = screenshots
+                        .iter()
+                        .map(|screenshot| screenshot.path.to_string_lossy().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if let Err(e) = self.memory_repo.insert_screenshot_analysis(
+                        &contact.id,
+                        Some(&source_context.id),
+                        &joined_paths,
+                        image_width,
+                        image_height,
+                        "apple_vision_or_provider_batch",
+                        &envelope.screenshot_analysis,
+                    ) {
+                        tracing::warn!("Failed to persist screenshot batch analysis: {e}");
+                    }
+                }
+                let source_cards = self.source_cards_for_view(
+                    "screenshot",
+                    &provider,
+                    &generation_context,
+                    persisted.source_context.as_ref(),
+                    None,
+                    &envelope.context_summary.summary,
+                );
+                self.emit_candidates_ready(
+                    app,
+                    &envelope,
+                    &provider,
+                    "screenshot_batch",
                     &generation_context.policy,
                     persisted.context_record.as_ref(),
                     &source_cards,
@@ -822,6 +1016,7 @@ impl Orchestrator {
             path,
             width: image.width,
             height: image.height,
+            captured_at: Utc::now().to_rfc3339(),
         })
     }
 
@@ -989,7 +1184,8 @@ impl Orchestrator {
                     source_confidence: memory.confidence,
                 });
                 block.push_str(&format!(
-                    "\n  - [{}] {}（来源：{}）",
+                    "\n  - [memory:{} / {}] {}（来源：{}）",
+                    memory.id,
                     memory.memory_type,
                     truncate_for_prompt(&memory.value, 80),
                     truncate_for_prompt(&memory.source_excerpt, 60)
@@ -1222,6 +1418,13 @@ impl Orchestrator {
             ) {
                 tracing::warn!("Failed to persist memory candidates: {e}");
             }
+            if let Err(e) = self.memory_repo.record_candidate_memory_usage(
+                &contact.id,
+                &run.id,
+                &envelope.candidates,
+            ) {
+                tracing::warn!("Failed to persist memory usage: {e}");
+            }
         }
 
         PersistedGenerationArtifacts {
@@ -1315,6 +1518,15 @@ impl Orchestrator {
     pub fn confirm_memory_candidate_record(&self, id: &str) -> Result<MemoryItemRecord, String> {
         self.memory_repo
             .confirm_memory_candidate(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn confirm_memory_candidate_record_with_edits(
+        &self,
+        edited: EditedMemoryCandidate,
+    ) -> Result<MemoryItemRecord, String> {
+        self.memory_repo
+            .confirm_memory_candidate_with_edits(&edited)
             .map_err(|e| e.to_string())
     }
 
@@ -1862,12 +2074,12 @@ impl Orchestrator {
         }
     }
 
-    async fn call_screenshot_provider(
+    async fn call_screenshot_provider_with_images(
         &self,
         config: &AppConfig,
         prompt: &str,
         schema_path: &PathBuf,
-        image_path: &Path,
+        image_paths: &[PathBuf],
     ) -> Result<(CandidateEnvelope, String), String> {
         if config.primary_provider != "codex" {
             tracing::info!(
@@ -1878,7 +2090,7 @@ impl Orchestrator {
 
         let provider = CodexProvider::new().with_timeout(config.timeout_seconds);
         provider
-            .generate_with_images(prompt, schema_path, &[image_path.to_path_buf()])
+            .generate_with_images(prompt, schema_path, image_paths)
             .await
             .map(|envelope| (envelope, "codex".to_string()))
             .map_err(|e| {
@@ -1984,6 +2196,7 @@ impl TriggerInput {
 enum GenerationInput {
     Text(String),
     Screenshot(ScreenshotInput),
+    ScreenshotBatch(Vec<ScreenshotInput>),
     Topic(Option<String>),
 }
 
@@ -1992,6 +2205,7 @@ impl GenerationInput {
         match self {
             GenerationInput::Text(_) => "text",
             GenerationInput::Screenshot(_) => "screenshot",
+            GenerationInput::ScreenshotBatch(_) => "screenshot",
             GenerationInput::Topic(_) => "topic",
         }
     }
@@ -2015,6 +2229,24 @@ struct ScreenshotInput {
     path: PathBuf,
     width: u32,
     height: u32,
+    captured_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScreenshotBatchItem {
+    pub index: usize,
+    pub width: u32,
+    pub height: u32,
+    pub captured_at: String,
+    pub local_turn_count: usize,
+    pub last_reply_target: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScreenshotBatchStatus {
+    pub count: usize,
+    pub items: Vec<ScreenshotBatchItem>,
 }
 
 struct GenerationGuard<'a> {
@@ -2303,6 +2535,108 @@ fn analyze_screenshot_locally(screenshot: &ScreenshotInput) -> ScreenshotAnalysi
             warnings: vec![format!("本地 Apple Vision OCR 不可用或失败：{e}")],
             ..ScreenshotAnalysis::default()
         },
+    }
+}
+
+fn analyze_screenshot_batch_locally(screenshots: &[ScreenshotInput]) -> ScreenshotAnalysis {
+    if screenshots.is_empty() {
+        return ScreenshotAnalysis::default();
+    }
+    let mut combined = ScreenshotAnalysis::default();
+    combined.warnings.push(format!(
+        "多截图按用户添加顺序拼接，共 {} 张；相邻截图之间可能存在时间断点或漏消息。",
+        screenshots.len()
+    ));
+    for (index, screenshot) in screenshots.iter().enumerate() {
+        let mut analysis = analyze_screenshot_locally(screenshot);
+        let image_label = format!("图{}", index + 1);
+        if index > 0 {
+            combined.warnings.push(format!(
+                "{} 与上一张截图之间需要检查时间/内容连续性。",
+                image_label
+            ));
+        }
+        if !analysis.visible_time_label.trim().is_empty() {
+            combined.visible_time_label = analysis.visible_time_label.clone();
+        }
+        if !analysis.last_reply_target.trim().is_empty() {
+            combined.last_reply_target = analysis.last_reply_target.clone();
+        }
+        for turn in &mut analysis.turns {
+            if turn.text.trim().is_empty() {
+                turn.text = format!(
+                    "[{}：{}]",
+                    image_label,
+                    media_kind_label_fallback(&turn.media_kind)
+                );
+            } else {
+                turn.text = format!("{}：{}", image_label, turn.text);
+            }
+            turn.warnings.push(format!("来自{}", image_label));
+        }
+        combined.turns.extend(analysis.turns);
+        combined.warnings.extend(
+            analysis
+                .warnings
+                .into_iter()
+                .map(|warning| format!("{}：{}", image_label, warning)),
+        );
+    }
+    combined.inferred_chat_time = "visible_time_only".to_string();
+    combined.staleness = "visible_time_only".to_string();
+    if combined.turns.len() > 20 {
+        let keep_from = combined.turns.len().saturating_sub(20);
+        combined.turns = combined.turns.split_off(keep_from);
+        combined
+            .warnings
+            .push("本地 OCR 预览仅保留最近 20 条 turn，provider 仍会读取全部截图。".to_string());
+    }
+    combined
+}
+
+fn screenshot_batch_dimensions(screenshots: &[ScreenshotInput]) -> (u32, u32) {
+    let width = screenshots
+        .iter()
+        .map(|screenshot| screenshot.width)
+        .max()
+        .unwrap_or_default();
+    let height = screenshots
+        .iter()
+        .map(|screenshot| screenshot.height)
+        .sum::<u32>();
+    (width, height)
+}
+
+fn media_kind_label_fallback(media_kind: &str) -> &str {
+    match media_kind {
+        "image" => "图片",
+        "emoji" => "表情",
+        "quote" => "引用消息",
+        "system" => "系统提示",
+        _ => "未知内容",
+    }
+}
+
+fn screenshot_batch_status(screenshots: &[ScreenshotInput]) -> ScreenshotBatchStatus {
+    let items = screenshots
+        .iter()
+        .enumerate()
+        .map(|(index, screenshot)| {
+            let analysis = analyze_screenshot_locally(screenshot);
+            ScreenshotBatchItem {
+                index: index + 1,
+                width: screenshot.width,
+                height: screenshot.height,
+                captured_at: screenshot.captured_at.clone(),
+                local_turn_count: analysis.turns.len(),
+                last_reply_target: analysis.last_reply_target,
+                warnings: analysis.warnings.into_iter().take(3).collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    ScreenshotBatchStatus {
+        count: screenshots.len(),
+        items,
     }
 }
 

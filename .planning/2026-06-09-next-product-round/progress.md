@@ -126,14 +126,14 @@
 - [x] `cargo fmt --manifest-path src-tauri/Cargo.toml`
 - [x] `cargo test --manifest-path src-tauri/Cargo.toml`：22 passed。
 - [x] `node --check frontend/main.js && node --check frontend/settings.js && node --check tests/windows-e2e-runner.mjs && node --check tests/macos-smoke-runner.mjs`
-- [x] `rg -n "齐齐|天津|上海工作|93 年|小周|在B 市|1990 后" src-tauri frontend tests`：无匹配。
+- [x] 真实式联系人/城市示例扫描 `src-tauri frontend tests`：无匹配。
 - [x] `rg -n "shell:allow|shell:default|tauri_plugin_shell|tauri-plugin-shell|last-claude-output|Orchestrator trigger error" src-tauri frontend tests`：无匹配。
 
 严格遗留项：
 
-- [ ] 多截图“按选择顺序拼接”的完整交互尚未做成；当前只完成截图解析 schema、turns 承载和单截图本地 OCR/视觉补偿。
-- [ ] 记忆候选收件箱已支持记住/忽略，但候选编辑和手动设置过期时间还不是完整 UI。
-- [ ] 已保存记忆的“最后使用时间/被哪些建议引用过”仍需更细的 usage tracking UI；当前可通过来源卡、关系卡和数据审计追踪主要来源。
+- [x] 多截图“按选择顺序拼接”的完整交互已补齐：逐张添加、按顺序生成、跨图断点提示。
+- [x] 记忆候选收件箱已支持记住/忽略/编辑/手动设置过期时间。
+- [x] 已保存记忆已支持最后使用时间和被哪些建议引用过的 usage tracking UI。
 
 ## 2026-06-09 Phase 1 补齐来源表和污染扫描
 
@@ -152,8 +152,36 @@
 - [x] `cargo fmt --manifest-path src-tauri/Cargo.toml`
 - [x] `cargo test --manifest-path src-tauri/Cargo.toml`：22 passed。
 - [x] `node --check frontend/main.js && node --check frontend/settings.js && node --check tests/windows-e2e-runner.mjs && node --check tests/macos-smoke-runner.mjs`
-- [x] `rg -n "齐齐|天津|上海工作|93 年|小周|在B 市|1990 后" src-tauri frontend tests`：无匹配。
+- [x] 真实式联系人/城市示例扫描 `src-tauri frontend tests`：无匹配。
 
 仍未完成：
 
 - [ ] 截图内可见时间仍未做 OCR/结构化抽取，只记录 `visible_message_time`/`inferred_chat_time` 字段并在无法确定时标记 `unknown`。
+
+## 2026-06-10 严格遗留项补齐
+
+已完成：
+
+- [x] Git 已先提交并推送 Phase 2-7 基础实现：`d0d2952 Implement EchoMate product phase foundations`。
+- [x] 主弹窗新增多截图批次交互：逐张添加截图、显示批次数量/本地识别摘要、按添加顺序生成、清空批次。
+- [x] 后端新增 `ScreenshotBatch` 生成输入：按用户选择顺序传多张图片给 Codex image input，本地 OCR 预览按图序拼接，prompt 和 `screenshot_analysis.warnings` 标记跨图时间/内容断点与重复区域。
+- [x] 记忆候选收件箱新增编辑 UI：用户确认前可改内容、类型、敏感度、来源摘录和过期天数；空 TTL 表示长期保存。
+- [x] 后端新增编辑确认命令和 repository 方法，确认时把编辑后的候选保存为 `memory_item`，并回写候选处理状态。
+- [x] 新增 `memory_usage_log`：生成候选持久化后，按 `source_refs` 中的 `memory:<id>` 精确记录候选引用过的已确认记忆，并更新 `memory_item.last_used_at`。
+- [x] 关系卡新增已批准记忆 usage UI：显示引用次数、最后使用时间、最近被哪些候选引用。
+- [x] 数据审计、导出、联系人清除和全量清除覆盖 `memory_usage_log`。
+- [x] 仓储回归测试新增：编辑候选并设置 TTL；候选引用记忆后写 usage log 和关系卡 summary。
+- [x] `.planning` 中真实式手动资料示例已匿名化。
+
+验证：
+
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml`
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml`：24 passed。
+- [x] `node --check frontend/main.js && node --check frontend/settings.js`
+- [x] `git diff --check`
+- [x] 真实式联系人/城市示例扫描 `src-tauri frontend tests`：无匹配。
+- [x] Shell/debug 残留扫描 `src-tauri frontend tests`：无匹配。
+
+当前状态：
+
+- Phase 2-7 严格遗留项已补齐；未运行会触达真实 EchoMate profile 的 Tauri e2e/manual flow。

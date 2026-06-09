@@ -375,6 +375,7 @@ async function loadRelationshipCard() {
     return;
   }
   const card = await safeInvoke('get_relationship_card', { contactId });
+  const usageByMemoryId = new Map((card.memory_usages || []).map((usage) => [usage.memory_id, usage]));
   box.innerHTML =
     '<div class="fact-row">' +
       '<div class="fact-main">' +
@@ -384,7 +385,7 @@ async function loadRelationshipCard() {
       '</div>' +
     '</div>' +
     renderCompactList('手动资料', card.contact_facts, (fact) => factTypeLabel(fact.fact_type) + ' · ' + fact.value) +
-    renderCompactList('已批准记忆', card.memories, (item) => memoryTypeLabel(item.memory_type) + ' · ' + item.value) +
+    renderMemoryUsageList(card.memories, usageByMemoryId) +
     renderCompactList('待处理候选', card.pending_memory_candidates, (item) => memoryTypeLabel(item.memory_type) + ' · ' + item.value) +
     renderCompactList('提醒', card.reminders, (item) => (item.reminder?.status || '') + ' · ' + (item.memory_item?.value || ''));
 }
@@ -406,17 +407,36 @@ async function loadMemoryInbox() {
   items.forEach((item) => {
     const row = document.createElement('div');
     row.className = 'fact-row';
+    const ttlValue = Number.isFinite(Number(item.ttl_days)) ? String(item.ttl_days) : '';
     row.innerHTML =
       '<div class="fact-main">' +
-        '<div class="fact-title">' + escapeHtml(memoryTypeLabel(item.memory_type)) + ' · ' + escapeHtml(item.value) + '</div>' +
+        '<div class="fact-title">' + escapeHtml(memoryTypeLabel(item.memory_type)) + ' · 待确认</div>' +
         '<div class="fact-meta">' + escapeHtml(item.sensitivity) + ' · 置信度 ' + confidenceText(item.confidence) + ' · ' + formatLocalTime(item.created_at) + '</div>' +
+        '<div class="memory-edit-grid">' +
+          '<label>内容<input class="memory-edit-input" data-field="value" maxlength="180" value="' + escapeHtml(item.value || '') + '"></label>' +
+          '<label>类型<select class="memory-edit-input" data-field="memory_type">' + memoryTypeOptions(item.memory_type) + '</select></label>' +
+          '<label>敏感度<select class="memory-edit-input" data-field="sensitivity">' + sensitivityOptions(item.sensitivity) + '</select></label>' +
+          '<label>过期天数<input class="memory-edit-input" data-field="ttl_days" type="number" min="1" max="3650" placeholder="长期" value="' + escapeHtml(ttlValue) + '"></label>' +
+        '</div>' +
+        '<label class="memory-edit-wide">来源摘录<input class="memory-edit-input" data-field="source_excerpt" maxlength="300" value="' + escapeHtml(item.source_excerpt || item.source_quote || '') + '"></label>' +
         (item.reason ? '<div class="fact-note">' + escapeHtml(item.reason) + '</div>' : '') +
       '</div>' +
       '<button class="small-btn" data-action="confirm">记住</button>' +
       '<button class="small-btn danger" data-action="ignore">忽略</button>';
     list.appendChild(row);
     row.querySelector('[data-action="confirm"]').addEventListener('click', async () => {
-      await safeInvoke('confirm_memory_candidate_record', { id: item.id });
+      const ttlRaw = row.querySelector('[data-field="ttl_days"]').value.trim();
+      await safeInvoke('confirm_memory_candidate_record_with_edits', {
+        edited: {
+          id: item.id,
+          value: row.querySelector('[data-field="value"]').value.trim(),
+          memory_type: row.querySelector('[data-field="memory_type"]').value,
+          sensitivity: row.querySelector('[data-field="sensitivity"]').value,
+          source_excerpt: row.querySelector('[data-field="source_excerpt"]').value.trim(),
+          ttl_days: ttlRaw ? Number(ttlRaw) : null,
+          clear_ttl: !ttlRaw,
+        },
+      });
       row.remove();
       await loadRelationshipCard().catch(() => {});
     });
@@ -639,6 +659,52 @@ function renderCompactList(title, items, labelFn) {
   return '<div class="compact-block"><div class="fact-meta">' + escapeHtml(title) + '</div>' +
     values.map((item) => '<div class="compact-row">' + escapeHtml(labelFn(item)) + '</div>').join('') +
     '</div>';
+}
+
+function renderMemoryUsageList(memories, usageByMemoryId) {
+  const values = Array.isArray(memories) ? memories.slice(0, 8) : [];
+  if (!values.length) {
+    return '<div class="empty-row">已批准记忆：暂无</div>';
+  }
+  return '<div class="compact-block"><div class="fact-meta">已批准记忆</div>' +
+    values.map((item) => {
+      const usage = usageByMemoryId.get(item.id) || {};
+      const lastUsed = usage.last_used_at || item.last_used_at || '';
+      const refs = Array.isArray(usage.recent_references) ? usage.recent_references.filter(Boolean) : [];
+      const meta = [
+        '引用 ' + String(usage.usage_count || 0) + ' 次',
+        lastUsed ? '最后使用 ' + formatLocalTime(lastUsed) : '尚未被建议引用'
+      ].join(' · ');
+      return '<div class="compact-row">' +
+        '<div>' + escapeHtml(memoryTypeLabel(item.memory_type) + ' · ' + item.value) + '</div>' +
+        '<div class="compact-meta">' + escapeHtml(meta) + '</div>' +
+        (refs.length ? '<div class="compact-meta">最近候选：' + escapeHtml(refs.slice(0, 2).join(' / ')) + '</div>' : '') +
+      '</div>';
+    }).join('') +
+    '</div>';
+}
+
+function memoryTypeOptions(current) {
+  const values = [
+    ['event', '事件'],
+    ['preference', '偏好'],
+    ['boundary', '边界'],
+    ['stress_point', '压力点'],
+    ['relationship_milestone', '关系节点'],
+  ];
+  return values.map(([value, label]) =>
+    '<option value="' + value + '"' + (value === current ? ' selected' : '') + '>' + label + '</option>'
+  ).join('');
+}
+
+function sensitivityOptions(current) {
+  const values = [
+    ['normal', '普通'],
+    ['medium', '中等'],
+  ];
+  return values.map(([value, label]) =>
+    '<option value="' + value + '"' + (value === current ? ' selected' : '') + '>' + label + '</option>'
+  ).join('');
 }
 
 function memoryTypeLabel(type) {

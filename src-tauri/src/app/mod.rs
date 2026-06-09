@@ -30,6 +30,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ui::commands::generate_replies,
             ui::commands::generate_replies_from_screenshot,
+            ui::commands::add_screenshot_to_batch,
+            ui::commands::clear_screenshot_batch,
+            ui::commands::generate_replies_from_screenshot_batch,
             ui::commands::generate_topics,
             ui::commands::get_last_generation_view,
             ui::commands::regenerate_candidates,
@@ -49,6 +52,7 @@ pub fn run() {
             ui::commands::ignore_reminder_candidate,
             ui::commands::list_memory_candidate_inbox,
             ui::commands::confirm_memory_candidate_record,
+            ui::commands::confirm_memory_candidate_record_with_edits,
             ui::commands::ignore_memory_candidate_record,
             ui::commands::list_reminders,
             ui::commands::complete_reminder,

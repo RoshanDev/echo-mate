@@ -2,15 +2,16 @@
 use crate::domain::{
     Candidate, ContactFactCandidate, ContactFactRecord, ContactInput, ContactRecord,
     ContextSummaryCandidate, ContextSummaryRecord, DataAuditCount, DataAuditReport,
-    DataContaminationFinding, MemoryCandidate, MemoryCandidateRecord, MemoryItemRecord,
-    MessageRecord, NextAction, RelationshipCard, ReminderCandidate, ReminderCenterItem,
-    ReminderDetail, ReminderRecord, ReplyFeedbackRecord, ScreenshotAnalysis, SourceCard,
-    SourceContextRecord, StyleProfileRecord, SuggestionRunRecord,
+    DataContaminationFinding, EditedMemoryCandidate, MemoryCandidate, MemoryCandidateRecord,
+    MemoryItemRecord, MemoryUsageSummary, MessageRecord, NextAction, RelationshipCard,
+    ReminderCandidate, ReminderCenterItem, ReminderDetail, ReminderRecord, ReplyFeedbackRecord,
+    ScreenshotAnalysis, SourceCard, SourceContextRecord, StyleProfileRecord, SuggestionRunRecord,
 };
 use crate::store::migrations::run_migrations;
 use anyhow::{anyhow, bail};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -163,6 +164,10 @@ impl MemoryRepository {
             params![id],
         )?;
         conn.execute(
+            "DELETE FROM memory_usage_log WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
             "DELETE FROM suggestion_runs WHERE contact_id = ?1",
             params![id],
         )?;
@@ -205,6 +210,10 @@ impl MemoryRepository {
         )?;
         conn.execute(
             "DELETE FROM memory_candidates WHERE contact_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM memory_usage_log WHERE contact_id = ?1",
             params![id],
         )?;
         conn.execute(
@@ -696,6 +705,69 @@ impl MemoryRepository {
         Ok(inserted)
     }
 
+    pub fn record_candidate_memory_usage(
+        &self,
+        contact_id: &str,
+        suggestion_run_id: &str,
+        candidates: &[Candidate],
+    ) -> anyhow::Result<usize> {
+        if contact_id.trim().is_empty()
+            || suggestion_run_id.trim().is_empty()
+            || candidates.is_empty()
+        {
+            return Ok(0);
+        }
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id
+             FROM memory_item
+             WHERE contact_id = ?1 AND status = 'confirmed'",
+        )?;
+        let rows = stmt.query_map(params![contact_id], |row| row.get::<_, String>(0))?;
+        let memory_ids = rows.collect::<Result<HashSet<_>, _>>()?;
+        if memory_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut inserted = 0;
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
+            let mut seen_for_candidate = HashSet::new();
+            for source_ref in &candidate.source_refs {
+                let memory_id = memory_id_from_source_ref(source_ref);
+                if memory_id.is_empty()
+                    || !memory_ids.contains(&memory_id)
+                    || !seen_for_candidate.insert(memory_id.clone())
+                {
+                    continue;
+                }
+                let created_at = now_rfc3339();
+                conn.execute(
+                    "INSERT INTO memory_usage_log
+                        (id, contact_id, memory_id, suggestion_run_id, candidate_index,
+                         candidate_text, source_ref, usage_reason, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        next_id("muse"),
+                        contact_id,
+                        &memory_id,
+                        suggestion_run_id,
+                        candidate_index as i64,
+                        truncate_chars(candidate.text.trim(), 220),
+                        truncate_chars(source_ref.trim(), 160),
+                        truncate_chars(candidate.reason.trim(), 300),
+                        &created_at
+                    ],
+                )?;
+                conn.execute(
+                    "UPDATE memory_item SET last_used_at = ?2 WHERE id = ?1",
+                    params![&memory_id, &created_at],
+                )?;
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
+
     pub fn recent_source_cards(
         &self,
         contact_id: &str,
@@ -917,6 +989,21 @@ impl MemoryRepository {
     }
 
     pub fn confirm_memory_candidate(&self, id: &str) -> anyhow::Result<MemoryItemRecord> {
+        self.confirm_memory_candidate_with_edits(&EditedMemoryCandidate {
+            id: id.to_string(),
+            memory_type: String::new(),
+            value: String::new(),
+            source_excerpt: String::new(),
+            sensitivity: String::new(),
+            ttl_days: None,
+            clear_ttl: false,
+        })
+    }
+
+    pub fn confirm_memory_candidate_with_edits(
+        &self,
+        edited: &EditedMemoryCandidate,
+    ) -> anyhow::Result<MemoryItemRecord> {
         let conn = self.connection()?;
         let candidate = conn.query_row(
             "SELECT id, contact_id, suggestion_run_id, source_context_id, candidate_index,
@@ -927,44 +1014,73 @@ impl MemoryRepository {
              FROM memory_candidates
              WHERE id = ?1
              LIMIT 1",
-            params![id],
+            params![&edited.id],
             memory_candidate_from_row,
         )?;
         if candidate.status != "candidate" {
             bail!("这条候选记忆已处理，不能重复保存");
         }
-        let expires_at = if candidate.expires_at.trim().is_empty() {
-            candidate
-                .ttl_days
-                .map(|days| to_rfc3339(Utc::now() + Duration::days(days.max(1))))
-                .unwrap_or_default()
+        let ttl_days = if edited.clear_ttl {
+            None
+        } else {
+            edited.ttl_days.or(candidate.ttl_days)
+        };
+        let expires_at = if edited.clear_ttl {
+            String::new()
+        } else if let Some(days) = ttl_days {
+            to_rfc3339(Utc::now() + Duration::days(days.max(1)))
+        } else if candidate.expires_at.trim().is_empty() {
+            String::new()
         } else {
             candidate.expires_at.clone()
         };
+        let value = non_empty(&edited.value, &candidate.value);
+        if value.trim().is_empty() {
+            bail!("候选记忆内容为空，不能保存");
+        }
         let saved = self.save_memory_candidate_for_contact(
             Some(&candidate.contact_id),
             &MemoryCandidate {
-                memory_type: candidate.memory_type.clone(),
+                memory_type: non_empty(&edited.memory_type, &candidate.memory_type),
                 summary: candidate.summary.clone(),
-                value: candidate.value.clone(),
+                value,
                 source_kind: candidate.source_kind.clone(),
                 source_ref: candidate.source_ref.clone(),
                 source_excerpt: fallback_if_empty(
-                    candidate.source_excerpt.clone(),
-                    candidate.source_quote.clone(),
+                    edited.source_excerpt.clone(),
+                    fallback_if_empty(
+                        candidate.source_excerpt.clone(),
+                        candidate.source_quote.clone(),
+                    ),
                 ),
                 source_quote: candidate.source_quote.clone(),
                 reason: candidate.reason.clone(),
                 confidence: candidate.confidence,
-                sensitivity: candidate.sensitivity.clone(),
+                sensitivity: non_empty(&edited.sensitivity, &candidate.sensitivity),
                 expires_at,
-                ttl_days: candidate.ttl_days,
+                ttl_days,
             },
         )?;
         let conn = self.connection()?;
         conn.execute(
-            "UPDATE memory_candidates SET status = 'confirmed' WHERE id = ?1",
-            params![id],
+            "UPDATE memory_candidates
+             SET status = 'confirmed',
+                 memory_type = ?2,
+                 value = ?3,
+                 source_excerpt = ?4,
+                 sensitivity = ?5,
+                 expires_at = ?6,
+                 ttl_days = ?7
+             WHERE id = ?1",
+            params![
+                &edited.id,
+                &saved.memory_type,
+                &saved.value,
+                &saved.source_excerpt,
+                &saved.sensitivity,
+                &saved.expires_at,
+                ttl_days
+            ],
         )?;
         Ok(saved)
     }
@@ -991,7 +1107,7 @@ impl MemoryRepository {
                 r.reason, r.suggested_follow_up, r.source_memory_id, r.source_context_id,
                 r.cooldown_key, r.status, r.snooze_until, r.snooze_count, r.created_at, r.updated_at,
                 m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
-                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
+                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at, m.last_used_at
              FROM reminder r
              JOIN memory_item m ON m.id = r.memory_id",
         );
@@ -1049,6 +1165,7 @@ impl MemoryRepository {
             "messages",
             "message_events",
             "memory_item",
+            "memory_usage_log",
             "memory_candidates",
             "reminder",
             "reminder_mutes",
@@ -1083,7 +1200,8 @@ impl MemoryRepository {
             "exported_at": now_rfc3339(),
             "contacts": query_json_rows(&conn, "SELECT id, alias, channel, is_allowlisted, created_at, updated_at FROM contacts ORDER BY updated_at DESC")?,
             "contact_facts": query_json_rows(&conn, "SELECT id, contact_id, fact_type, value, normalized_value, source_note, fact_source, sensitivity, confidence, ttl_days, usage_policy, created_at, updated_at, last_used_at FROM contact_facts ORDER BY updated_at DESC")?,
-            "memories": query_json_rows(&conn, "SELECT id, contact_id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at FROM memory_item ORDER BY updated_at DESC")?,
+            "memories": query_json_rows(&conn, "SELECT id, contact_id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at, last_used_at FROM memory_item ORDER BY updated_at DESC")?,
+            "memory_usage_log": query_json_rows(&conn, "SELECT id, contact_id, memory_id, suggestion_run_id, candidate_index, candidate_text, source_ref, usage_reason, created_at FROM memory_usage_log ORDER BY created_at DESC")?,
             "reminders": query_json_rows(&conn, "SELECT id, memory_id, contact_id, kind, due_at, trigger_at, reason, suggested_follow_up, source_context_id, cooldown_key, status, snooze_until, snooze_count, created_at, updated_at FROM reminder ORDER BY updated_at DESC")?,
             "context_summaries": query_json_rows(&conn, "SELECT id, contact_id, source_kind, source_ref, summary, created_at FROM context_summary ORDER BY created_at DESC")?,
             "source_contexts": query_json_rows(&conn, "SELECT id, contact_id, provider, input_kind, fact_source, source_label, source_excerpt, created_at, captured_at, visible_message_time, inferred_chat_time, source_confidence FROM source_contexts ORDER BY created_at DESC")?,
@@ -1098,6 +1216,7 @@ impl MemoryRepository {
             "platform_signal_log",
             "reminder_mutes",
             "reminder",
+            "memory_usage_log",
             "memory_candidates",
             "memory_item",
             "message_events",
@@ -1182,6 +1301,11 @@ impl MemoryRepository {
         let recent_messages = self.recent_messages(contact_id, 8)?;
         let contact_facts = self.list_contact_facts(contact_id)?;
         let memories = self.confirmed_memories_for_contact(contact_id, 8)?;
+        let memory_ids = memories
+            .iter()
+            .map(|memory| memory.id.clone())
+            .collect::<Vec<_>>();
+        let memory_usages = self.memory_usage_summaries(&memory_ids)?;
         let pending_memory_candidates =
             self.list_memory_candidates(contact_id, Some("candidate"), 8)?;
         let reminders = self.list_reminders(Some(contact_id), false, 8)?;
@@ -1206,6 +1330,7 @@ impl MemoryRepository {
             recent_messages,
             contact_facts,
             memories,
+            memory_usages,
             pending_memory_candidates,
             reminders,
             style_profile,
@@ -1266,6 +1391,20 @@ impl MemoryRepository {
                 "fact_source",
                 "source_context_id",
                 "status",
+            ],
+        )?;
+        scan_table_for_test_artifacts(
+            &conn,
+            &mut findings,
+            "memory_usage_log",
+            "id",
+            "contact_id",
+            &[
+                "memory_id",
+                "suggestion_run_id",
+                "candidate_text",
+                "source_ref",
+                "usage_reason",
             ],
         )?;
         scan_table_for_test_artifacts(
@@ -1422,7 +1561,7 @@ impl MemoryRepository {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT id, contact_id, type, value, source_kind, source_ref, source_excerpt,
-                confidence, sensitivity, expires_at, status, created_at, updated_at
+                confidence, sensitivity, expires_at, status, created_at, updated_at, last_used_at
              FROM memory_item
              WHERE contact_id = ?1 AND status = 'confirmed'
              ORDER BY updated_at DESC
@@ -1430,6 +1569,41 @@ impl MemoryRepository {
         )?;
         let rows = stmt.query_map(params![contact_id, limit as i64], memory_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn memory_usage_summaries(
+        &self,
+        memory_ids: &[String],
+    ) -> anyhow::Result<Vec<MemoryUsageSummary>> {
+        if memory_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let mut summaries = Vec::new();
+        for memory_id in memory_ids {
+            let (usage_count, last_used_at): (i64, Option<String>) = conn.query_row(
+                "SELECT COUNT(1), MAX(created_at)
+                 FROM memory_usage_log
+                 WHERE memory_id = ?1",
+                params![memory_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let mut ref_stmt = conn.prepare(
+                "SELECT candidate_text
+                 FROM memory_usage_log
+                 WHERE memory_id = ?1
+                 ORDER BY created_at DESC
+                 LIMIT 3",
+            )?;
+            let rows = ref_stmt.query_map(params![memory_id], |row| row.get::<_, String>(0))?;
+            summaries.push(MemoryUsageSummary {
+                memory_id: memory_id.clone(),
+                usage_count,
+                last_used_at: last_used_at.unwrap_or_default(),
+                recent_references: rows.collect::<Result<Vec<_>, _>>()?,
+            });
+        }
+        Ok(summaries)
     }
 
     pub fn update_style_profile_from_reply(
@@ -1649,6 +1823,7 @@ impl MemoryRepository {
             status: "confirmed".to_string(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
+            last_used_at: String::new(),
         };
 
         self.insert_memory_record(&record)?;
@@ -1688,6 +1863,7 @@ impl MemoryRepository {
             status: "confirmed".to_string(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
+            last_used_at: String::new(),
         };
         self.insert_memory_record(&memory)?;
 
@@ -1763,7 +1939,7 @@ impl MemoryRepository {
                 r.reason, r.suggested_follow_up, r.source_memory_id, r.source_context_id,
                 r.cooldown_key, r.status, r.snooze_until, r.snooze_count, r.created_at, r.updated_at,
                 m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
-                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
+                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at, m.last_used_at
              FROM reminder r
              JOIN memory_item m ON m.id = r.memory_id
              WHERE r.status = 'scheduled' AND r.trigger_at <= ?1
@@ -1787,7 +1963,7 @@ impl MemoryRepository {
                 r.reason, r.suggested_follow_up, r.source_memory_id, r.source_context_id,
                 r.cooldown_key, r.status, r.snooze_until, r.snooze_count, r.created_at, r.updated_at,
                 m.id, m.contact_id, m.type, m.value, m.source_kind, m.source_ref, m.source_excerpt,
-                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at
+                m.confidence, m.sensitivity, m.expires_at, m.status, m.created_at, m.updated_at, m.last_used_at
              FROM reminder r
              JOIN memory_item m ON m.id = r.memory_id
              WHERE r.status = 'notified'
@@ -1903,8 +2079,8 @@ impl MemoryRepository {
         let conn = self.connection()?;
         conn.execute(
             "INSERT INTO memory_item
-                (id, contact_id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                (id, contact_id, type, value, source_kind, source_ref, source_excerpt, confidence, sensitivity, expires_at, status, created_at, updated_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 &record.id,
                 &record.contact_id,
@@ -1918,7 +2094,8 @@ impl MemoryRepository {
                 &record.expires_at,
                 &record.status,
                 &record.created_at,
-                &record.updated_at
+                &record.updated_at,
+                &record.last_used_at
             ],
         )?;
         Ok(())
@@ -2104,6 +2281,7 @@ fn memory_from_joined_row(row: &Row<'_>, start: usize) -> rusqlite::Result<Memor
         status: row.get(start + 10)?,
         created_at: row.get(start + 11)?,
         updated_at: row.get(start + 12)?,
+        last_used_at: row.get(start + 13)?,
     })
 }
 
@@ -2329,6 +2507,23 @@ fn fallback_if_empty(value: String, fallback: String) -> String {
     } else {
         value
     }
+}
+
+fn memory_id_from_source_ref(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let after_prefix = trimmed
+        .strip_prefix("memory:")
+        .or_else(|| trimmed.strip_prefix("mem:"))
+        .unwrap_or(trimmed);
+    after_prefix
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '/' | ',' | ';' | '，' | '；'))
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -2800,6 +2995,142 @@ mod tests {
             })
             .expect_err("forbidden should fail");
         assert!(err.to_string().contains("禁止保存"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn memory_candidate_confirm_with_edits_sets_ttl() {
+        let path = std::env::temp_dir().join(format!("echomate-test-{}.db", next_id("repo")));
+        let repo = MemoryRepository::new(path.clone()).expect("repo");
+        let contact = repo
+            .upsert_contact(&ContactInput {
+                id: None,
+                alias: "联系人B".to_string(),
+                channel: "wechat".to_string(),
+                is_allowlisted: true,
+            })
+            .expect("upsert contact");
+        let run = repo
+            .record_suggestion_run(
+                &contact.id,
+                "codex",
+                "clipboard",
+                None,
+                &[],
+                "候选记忆测试。",
+            )
+            .expect("record run");
+        repo.record_memory_candidates_for_run(
+            &contact.id,
+            &run.id,
+            None,
+            &[MemoryCandidate {
+                memory_type: "event".to_string(),
+                summary: "对方下周考试".to_string(),
+                value: "对方下周考试".to_string(),
+                source_kind: "clipboard".to_string(),
+                source_ref: "current-request".to_string(),
+                source_excerpt: "下周考试".to_string(),
+                source_quote: "下周考试".to_string(),
+                reason: "明确短期事件".to_string(),
+                confidence: 0.82,
+                sensitivity: "normal".to_string(),
+                expires_at: String::new(),
+                ttl_days: Some(10),
+            }],
+        )
+        .expect("record candidate");
+        let inbox = repo
+            .list_memory_candidates(&contact.id, Some("candidate"), 10)
+            .expect("list inbox");
+        let saved = repo
+            .confirm_memory_candidate_with_edits(&EditedMemoryCandidate {
+                id: inbox[0].id.clone(),
+                memory_type: "stress_point".to_string(),
+                value: "对方最近备考压力较大".to_string(),
+                source_excerpt: "说到下周考试".to_string(),
+                sensitivity: "medium".to_string(),
+                ttl_days: Some(3),
+                clear_ttl: false,
+            })
+            .expect("confirm edited candidate");
+        assert_eq!(saved.memory_type, "stress_point");
+        assert_eq!(saved.value, "对方最近备考压力较大");
+        assert_eq!(saved.sensitivity, "medium");
+        assert!(!saved.expires_at.is_empty());
+        assert!(repo
+            .list_memory_candidates(&contact.id, Some("candidate"), 10)
+            .expect("inbox after confirm")
+            .is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn memory_usage_tracking_records_candidate_refs() {
+        let path = std::env::temp_dir().join(format!("echomate-test-{}.db", next_id("repo")));
+        let repo = MemoryRepository::new(path.clone()).expect("repo");
+        let contact = repo
+            .upsert_contact(&ContactInput {
+                id: None,
+                alias: "联系人C".to_string(),
+                channel: "wechat".to_string(),
+                is_allowlisted: true,
+            })
+            .expect("upsert contact");
+        let memory = repo
+            .save_memory_candidate_for_contact(
+                Some(&contact.id),
+                &MemoryCandidate {
+                    memory_type: "preference".to_string(),
+                    summary: "对方喜欢轻松散步".to_string(),
+                    value: "对方喜欢轻松散步".to_string(),
+                    source_kind: "manual".to_string(),
+                    source_ref: "manual-note".to_string(),
+                    source_excerpt: "用户确认偏好".to_string(),
+                    source_quote: "用户确认偏好".to_string(),
+                    reason: "已确认偏好".to_string(),
+                    confidence: 0.9,
+                    sensitivity: "normal".to_string(),
+                    expires_at: String::new(),
+                    ttl_days: None,
+                },
+            )
+            .expect("save memory");
+        let run = repo
+            .record_suggestion_run(&contact.id, "codex", "topic", None, &[], "主动找话题。")
+            .expect("record run");
+        let inserted = repo
+            .record_candidate_memory_usage(
+                &contact.id,
+                &run.id,
+                &[Candidate {
+                    text: "这两天要不要找个地方散步".to_string(),
+                    intent_group: "邀约".to_string(),
+                    style_tags: vec!["低压".to_string()],
+                    risk_flags: vec!["none".to_string()],
+                    source_refs: vec![format!("memory:{}", memory.id)],
+                    reason: "引用已确认偏好".to_string(),
+                }],
+            )
+            .expect("record usage");
+        assert_eq!(inserted, 1);
+        let memories = repo
+            .confirmed_memories_for_contact(&contact.id, 5)
+            .expect("memories");
+        assert!(!memories[0].last_used_at.is_empty());
+        let card = repo
+            .relationship_card(&contact.id)
+            .expect("relationship card");
+        let usage = card
+            .memory_usages
+            .iter()
+            .find(|usage| usage.memory_id == memory.id)
+            .expect("usage summary");
+        assert_eq!(usage.usage_count, 1);
+        assert!(!usage.last_used_at.is_empty());
+        assert_eq!(usage.recent_references[0], "这两天要不要找个地方散步");
+
         let _ = std::fs::remove_file(path);
     }
 

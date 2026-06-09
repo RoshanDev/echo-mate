@@ -144,6 +144,32 @@ pub struct MemoryItemRecord {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    pub last_used_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditedMemoryCandidate {
+    pub id: String,
+    #[serde(default)]
+    pub memory_type: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub source_excerpt: String,
+    #[serde(default)]
+    pub sensitivity: String,
+    #[serde(default)]
+    pub ttl_days: Option<i64>,
+    #[serde(default)]
+    pub clear_ttl: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryUsageSummary {
+    pub memory_id: String,
+    pub usage_count: i64,
+    pub last_used_at: String,
+    pub recent_references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +336,7 @@ pub struct RelationshipCard {
     pub recent_messages: Vec<MessageRecord>,
     pub contact_facts: Vec<ContactFactRecord>,
     pub memories: Vec<MemoryItemRecord>,
+    pub memory_usages: Vec<MemoryUsageSummary>,
     pub pending_memory_candidates: Vec<MemoryCandidateRecord>,
     pub reminders: Vec<ReminderCenterItem>,
     pub style_profile: Option<StyleProfileRecord>,

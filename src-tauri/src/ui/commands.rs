@@ -1,10 +1,10 @@
 use crate::agent::orchestrator::{AppConfig, OrchestratorState};
 use crate::domain::{
     ContactFactCandidate, ContactFactClassification, ContactFactRecord, ContactInput,
-    ContactRecord, DataAuditReport, MacosContextSnapshot, MemoryCandidate, MemoryCandidateRecord,
-    MemoryItemRecord, PermissionStatus, PlatformSignal, PlatformSignalResult, PrivacyGuideStatus,
-    RelationshipCard, ReminderCandidate, ReminderCenterItem, ReminderDetail, ReplyFeedbackRecord,
-    StyleProfileRecord,
+    ContactRecord, DataAuditReport, EditedMemoryCandidate, MacosContextSnapshot, MemoryCandidate,
+    MemoryCandidateRecord, MemoryItemRecord, PermissionStatus, PlatformSignal,
+    PlatformSignalResult, PrivacyGuideStatus, RelationshipCard, ReminderCandidate,
+    ReminderCenterItem, ReminderDetail, ReplyFeedbackRecord, StyleProfileRecord,
 };
 use crate::platform::macos_context::MacosContextHelper;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -26,6 +26,41 @@ pub async fn generate_replies_from_screenshot(
     state: State<'_, OrchestratorState>,
 ) -> Result<(), String> {
     state.0.trigger_from_screenshot(&app).await.map(|_| ())
+}
+
+/// Add one chat screenshot to the current ordered screenshot batch.
+#[tauri::command]
+pub async fn add_screenshot_to_batch(
+    app: AppHandle,
+    state: State<'_, OrchestratorState>,
+) -> Result<serde_json::Value, String> {
+    state
+        .0
+        .add_screenshot_to_batch(&app)
+        .await
+        .and_then(|status| serde_json::to_value(status).map_err(|e| e.to_string()))
+}
+
+/// Clear the current ordered screenshot batch.
+#[tauri::command]
+pub async fn clear_screenshot_batch(
+    app: AppHandle,
+    state: State<'_, OrchestratorState>,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(state.0.clear_screenshot_batch(&app)).map_err(|e| e.to_string())
+}
+
+/// Generate replies from screenshots in the order they were added.
+#[tauri::command]
+pub async fn generate_replies_from_screenshot_batch(
+    app: AppHandle,
+    state: State<'_, OrchestratorState>,
+) -> Result<(), String> {
+    state
+        .0
+        .trigger_from_screenshot_batch(&app)
+        .await
+        .map(|_| ())
 }
 
 /// Generate proactive topic starters without relying on the latest message.
@@ -275,6 +310,15 @@ pub async fn confirm_memory_candidate_record(
     id: String,
 ) -> Result<MemoryItemRecord, String> {
     state.0.confirm_memory_candidate_record(&id)
+}
+
+/// Confirm one pending memory candidate after user edits value/type/TTL.
+#[tauri::command]
+pub async fn confirm_memory_candidate_record_with_edits(
+    state: State<'_, OrchestratorState>,
+    edited: EditedMemoryCandidate,
+) -> Result<MemoryItemRecord, String> {
+    state.0.confirm_memory_candidate_record_with_edits(edited)
 }
 
 /// Ignore one pending memory candidate.

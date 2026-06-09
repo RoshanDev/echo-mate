@@ -36,7 +36,7 @@ impl PromptComposer {
 输出要求：
 - 严格符合传入 JSON Schema
 - 每条候选长度控制在 10~45 个汉字为主
-- 每条候选必须填写 intent_group，并用 source_refs 指向使用到的来源卡/记忆/手动资料；未引用长期上下文时可为空数组
+- 每条候选必须填写 intent_group，并用 source_refs 指向使用到的来源卡/记忆/手动资料；引用已确认记忆时使用 memory:<id>；未引用长期上下文时可为空数组
 - 每条候选附带 style_tags、risk_flags、reason
 - situation 总结当前局面、下一行动、时效性和弱关系/情绪信号；不得输出伪确定评分
 - source_summary 简短说明本次使用了哪些来源，以及哪些来源因为不相关/敏感/时间不明而没有使用

@@ -34,6 +34,22 @@ pub fn run_migrations(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_memory_item_contact_status
             ON memory_item(contact_id, status, updated_at);
 
+        CREATE TABLE IF NOT EXISTS memory_usage_log (
+            id TEXT PRIMARY KEY,
+            contact_id TEXT NOT NULL DEFAULT '',
+            memory_id TEXT NOT NULL DEFAULT '',
+            suggestion_run_id TEXT NOT NULL DEFAULT '',
+            candidate_index INTEGER NOT NULL DEFAULT 0,
+            candidate_text TEXT NOT NULL DEFAULT '',
+            source_ref TEXT NOT NULL DEFAULT '',
+            usage_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(memory_id) REFERENCES memory_item(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memory_usage_contact_memory
+            ON memory_usage_log(contact_id, memory_id, created_at);
+
         CREATE TABLE IF NOT EXISTS reminder (
             id TEXT PRIMARY KEY,
             memory_id TEXT NOT NULL,

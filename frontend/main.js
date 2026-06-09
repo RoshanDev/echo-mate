@@ -17,12 +17,14 @@ let currentContextRecord = null;
 let currentSourceCards = [];
 let currentScreenshotAnalysis = null;
 let currentContacts = [];
+let screenshotBatchStatus = { count: 0, items: [] };
 
 // Card color palette — cycles through 5 tints
 const CARD_COLORS = ['card-green', 'card-blue', 'card-purple', 'card-coral', 'card-pink'];
 const GENERATION_COMMANDS = new Set([
   'generate_replies',
   'generate_replies_from_screenshot',
+  'generate_replies_from_screenshot_batch',
   'generate_topics',
   'regenerate_candidates',
   'regenerate_with_style'
@@ -50,10 +52,12 @@ document.addEventListener('DOMContentLoaded', () => {
   listen('candidates-ready', handleCandidatesReady);
   listen('generation-error', handleError);
   listen('generation-started', handleGenerationStarted);
+  listen('screenshot-batch-updated', handleScreenshotBatchUpdated);
   listen('reminder-due', handleReminderDue);
   listen('inbound-signal', handleInboundSignal);
 
   setupButtons();
+  renderScreenshotBatchStatus(screenshotBatchStatus);
   loadContacts();
   recoverLastGenerationView();
   recoverReminderPanel();
@@ -91,6 +95,41 @@ function setupButtons() {
     });
   }
 
+  const batchAddBtn = document.getElementById('btn-screenshot-batch-add');
+  if (batchAddBtn) {
+    batchAddBtn.addEventListener('click', async () => {
+      if (isGenerating) return;
+      document.getElementById('status-text').textContent = '框选第 ' + ((screenshotBatchStatus.count || 0) + 1) + ' 张截图...';
+      try {
+        const status = await safeInvoke('add_screenshot_to_batch');
+        if (status) renderScreenshotBatchStatus(status);
+      } catch (err) {
+        console.error('Add screenshot to batch failed:', err);
+      }
+    });
+  }
+
+  const batchGenerateBtn = document.getElementById('btn-screenshot-batch-generate');
+  if (batchGenerateBtn) {
+    batchGenerateBtn.addEventListener('click', () => {
+      const count = screenshotBatchStatus.count || 0;
+      if (!count) {
+        showError('多截图批次为空。');
+        return;
+      }
+      triggerGeneration('generate_replies_from_screenshot_batch', undefined, '正在按选择顺序理解 ' + count + ' 张截图...');
+    });
+  }
+
+  const batchClearBtn = document.getElementById('btn-screenshot-batch-clear');
+  if (batchClearBtn) {
+    batchClearBtn.addEventListener('click', async () => {
+      const status = await safeInvoke('clear_screenshot_batch').catch(() => null);
+      renderScreenshotBatchStatus(status || { count: 0, items: [] });
+      document.getElementById('status-text').textContent = '已清空多截图批次';
+    });
+  }
+
   const contactSelect = document.getElementById('contact-select');
   if (contactSelect) {
     contactSelect.addEventListener('change', async () => {
@@ -101,6 +140,30 @@ function setupButtons() {
         : '未选择联系人，不保存上下文';
     });
   }
+}
+
+function handleScreenshotBatchUpdated(event) {
+  renderScreenshotBatchStatus(event.payload || { count: 0, items: [] });
+}
+
+function renderScreenshotBatchStatus(status) {
+  screenshotBatchStatus = status || { count: 0, items: [] };
+  const bar = document.getElementById('screenshot-batch-bar');
+  const label = document.getElementById('screenshot-batch-status');
+  if (!bar || !label) return;
+  const count = screenshotBatchStatus.count || 0;
+  bar.style.display = 'flex';
+  const latest = (screenshotBatchStatus.items || [])[count - 1];
+  const latestHint = latest?.last_reply_target
+    ? ' · 最近识别：' + latest.last_reply_target
+    : '';
+  label.textContent = count
+    ? '多截图：' + count + ' 张' + latestHint
+    : '多截图：0 张';
+  const generateBtn = document.getElementById('btn-screenshot-batch-generate');
+  const clearBtn = document.getElementById('btn-screenshot-batch-clear');
+  if (generateBtn && !isGenerating) generateBtn.disabled = count === 0;
+  if (clearBtn && !isGenerating) clearBtn.disabled = count === 0;
 }
 
 function triggerGeneration(cmd, args, loadingText) {
@@ -771,9 +834,21 @@ function showError(msg) {
 
 function setGenerating(active) {
   isGenerating = active;
-  ['btn-test-generate', 'btn-topic-generate', 'btn-screenshot-generate', 'btn-regenerate', 'btn-conservative', 'btn-fun'].forEach((id) => {
+  [
+    'btn-test-generate',
+    'btn-topic-generate',
+    'btn-screenshot-generate',
+    'btn-screenshot-batch-add',
+    'btn-screenshot-batch-generate',
+    'btn-screenshot-batch-clear',
+    'btn-regenerate',
+    'btn-conservative',
+    'btn-fun'
+  ].forEach((id) => {
     const btn = document.getElementById(id);
-    if (btn) btn.disabled = active;
+    if (!btn) return;
+    const needsBatch = id === 'btn-screenshot-batch-generate' || id === 'btn-screenshot-batch-clear';
+    btn.disabled = active || (needsBatch && !(screenshotBatchStatus.count || 0));
   });
   const topicHint = document.getElementById('topic-hint-input');
   if (topicHint) topicHint.disabled = active;
