@@ -78,6 +78,14 @@ impl MemoryRepository {
         let id = existing
             .or(existing_by_key)
             .map(|contact| contact.id)
+            .or_else(|| {
+                input
+                    .id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| next_id("contact"));
 
         conn.execute(
@@ -2995,6 +3003,24 @@ mod tests {
             })
             .expect_err("forbidden should fail");
         assert!(err.to_string().contains("禁止保存"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn contact_upsert_preserves_provided_new_id() {
+        let path = std::env::temp_dir().join(format!("echomate-test-{}.db", next_id("repo")));
+        let repo = MemoryRepository::new(path.clone()).expect("repo");
+        let contact = repo
+            .upsert_contact(&ContactInput {
+                id: Some("echomate-e2e-account".to_string()),
+                alias: "EchoMate E2E 测试账号".to_string(),
+                channel: "wechat".to_string(),
+                is_allowlisted: true,
+            })
+            .expect("upsert contact with fixed id");
+
+        assert_eq!(contact.id, "echomate-e2e-account");
+        assert!(contact.is_allowlisted);
         let _ = std::fs::remove_file(path);
     }
 
