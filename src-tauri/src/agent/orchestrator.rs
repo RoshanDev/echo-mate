@@ -42,6 +42,9 @@ const RECENT_CONTEXT_LIMIT: usize = 8;
 const CONTACT_MEMORY_LIMIT: usize = 8;
 const CONTACT_FACT_LIMIT: usize = 8;
 const SOURCE_CARD_LIMIT: usize = 8;
+const DEFAULT_E2E_ACCOUNT_ID: &str = "echomate-e2e-account";
+const DEFAULT_E2E_CONTACT_ALIAS: &str = "EchoMate E2E 测试账号";
+const DEFAULT_E2E_CONTACT_CHANNEL: &str = "wechat";
 
 fn default_context_retention_days() -> i64 {
     30
@@ -124,7 +127,7 @@ pub struct Orchestrator {
 impl Orchestrator {
     pub fn new() -> Self {
         let schema_dir = std::env::temp_dir().join("echomate-schemas");
-        let config = Self::load_config();
+        let mut config = Self::load_config();
         tracing::info!(
             "Config loaded: hotkey={}, provider={}",
             config.hotkey,
@@ -136,6 +139,17 @@ impl Orchestrator {
             MemoryRepository::new(fallback).expect("fallback EchoMate database should open")
         });
         tracing::info!("Memory DB: {}", memory_repo.db_path().display());
+        if e2e_mock_provider_enabled() {
+            match ensure_e2e_test_account(&memory_repo) {
+                Ok(contact) => {
+                    config.active_contact_id = contact.id;
+                    config.global_privacy_mode = false;
+                    config.strict_privacy = false;
+                    tracing::info!("E2E test account activated: {}", config.active_contact_id);
+                }
+                Err(e) => tracing::warn!("Failed to activate e2e test account: {e}"),
+            }
+        }
         Self {
             config: Arc::new(Mutex::new(config)),
             hotkey: HotkeyManager::new(),
@@ -1219,7 +1233,9 @@ impl Orchestrator {
         mut envelope: CandidateEnvelope,
         context: &GenerationContext,
     ) -> CandidateEnvelope {
-        if e2e_mock_provider_enabled() || has_e2e_mock_artifacts(&envelope) {
+        if (e2e_mock_provider_enabled() || has_e2e_mock_artifacts(&envelope))
+            && !e2e_can_save_mock_context(context)
+        {
             envelope.memory_candidates.clear();
             envelope.reminder_candidates.clear();
             envelope.context_summary.summary.clear();
@@ -1256,7 +1272,9 @@ impl Orchestrator {
             source_context: None,
             suggestion_run: None,
         };
-        if e2e_mock_provider_enabled() || has_e2e_mock_artifacts(envelope) {
+        if (e2e_mock_provider_enabled() || has_e2e_mock_artifacts(envelope))
+            && !e2e_can_save_mock_context(context)
+        {
             tracing::warn!("Skipped persistence for e2e mock generation artifacts");
             return empty();
         }
@@ -1490,10 +1508,12 @@ impl Orchestrator {
         &self,
         candidate: crate::domain::MemoryCandidate,
     ) -> Result<crate::domain::MemoryItemRecord, String> {
-        if e2e_mock_provider_enabled() || candidate.source_ref == "e2e-mock" {
+        let context = self.generation_context(&self.config.lock().unwrap().clone());
+        if (e2e_mock_provider_enabled() || candidate.source_ref == "e2e-mock")
+            && !e2e_can_save_mock_context(&context)
+        {
             return Err("测试 mock 记忆不允许保存到真实联系人上下文。".to_string());
         }
-        let context = self.generation_context(&self.config.lock().unwrap().clone());
         let contact_id = context
             .policy
             .can_save_context
@@ -1542,10 +1562,12 @@ impl Orchestrator {
         candidate: crate::domain::ReminderCandidate,
         trigger_at: Option<String>,
     ) -> Result<crate::domain::ReminderDetail, String> {
-        if e2e_mock_provider_enabled() || candidate.source_ref == "e2e-mock" {
+        let context = self.generation_context(&self.config.lock().unwrap().clone());
+        if (e2e_mock_provider_enabled() || candidate.source_ref == "e2e-mock")
+            && !e2e_can_save_mock_context(&context)
+        {
             return Err("测试 mock 提醒不允许保存到真实联系人上下文。".to_string());
         }
-        let context = self.generation_context(&self.config.lock().unwrap().clone());
         let contact_id = context
             .policy
             .can_save_context
@@ -2963,6 +2985,56 @@ fn e2e_profile_dir() -> PathBuf {
         })
 }
 
+fn e2e_account_id() -> String {
+    std::env::var("ECHOMATE_E2E_ACCOUNT_ID").unwrap_or_else(|_| DEFAULT_E2E_ACCOUNT_ID.to_string())
+}
+
+fn e2e_contact_alias() -> String {
+    std::env::var("ECHOMATE_E2E_CONTACT_ALIAS")
+        .unwrap_or_else(|_| DEFAULT_E2E_CONTACT_ALIAS.to_string())
+}
+
+fn e2e_contact_channel() -> String {
+    std::env::var("ECHOMATE_E2E_CONTACT_CHANNEL")
+        .unwrap_or_else(|_| DEFAULT_E2E_CONTACT_CHANNEL.to_string())
+}
+
+fn e2e_profile_is_temporary() -> bool {
+    let profile = canonical_or_original(e2e_profile_dir());
+    let temp = canonical_or_original(std::env::temp_dir());
+    profile.starts_with(temp)
+}
+
+fn canonical_or_original(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn ensure_e2e_test_account(repo: &MemoryRepository) -> anyhow::Result<ContactRecord> {
+    repo.upsert_contact(&ContactInput {
+        id: Some(e2e_account_id()),
+        alias: e2e_contact_alias(),
+        channel: e2e_contact_channel(),
+        is_allowlisted: true,
+    })
+}
+
+fn e2e_can_save_mock_context(context: &GenerationContext) -> bool {
+    if !e2e_mock_provider_enabled() || !e2e_profile_is_temporary() {
+        return false;
+    }
+    context
+        .contact
+        .as_ref()
+        .map(|contact| {
+            contact.id == e2e_account_id()
+                && contact.alias == e2e_contact_alias()
+                && contact.channel == e2e_contact_channel()
+                && contact.is_allowlisted
+                && context.policy.can_save_context
+        })
+        .unwrap_or(false)
+}
+
 fn has_e2e_mock_artifacts(envelope: &CandidateEnvelope) -> bool {
     envelope.context_summary.source_ref == "e2e-mock"
         || envelope
@@ -2994,6 +3066,7 @@ fn e2e_disable_cooldown_enabled() -> bool {
 }
 
 fn mock_e2e_envelope(source_kind: &str) -> CandidateEnvelope {
+    let trigger_at = (Utc::now() - ChronoDuration::seconds(1)).to_rfc3339();
     CandidateEnvelope {
         candidates: vec![
             Candidate {
@@ -3049,9 +3122,37 @@ fn mock_e2e_envelope(source_kind: &str) -> CandidateEnvelope {
             reason: "她明确提到明天面试，适合轻鼓励后收束，不继续追问。".to_string(),
             confidence: 0.86,
         },
-        source_summary: "e2e mock 输出，不能进入真实上下文。".to_string(),
-        memory_candidates: Vec::new(),
-        reminder_candidates: Vec::new(),
+        source_summary: "e2e mock 输出，只允许进入临时测试账号。".to_string(),
+        memory_candidates: vec![crate::domain::MemoryCandidate {
+            memory_type: "event".to_string(),
+            summary: "对方明天有面试".to_string(),
+            value: "对方明天有面试，面试前有点紧张".to_string(),
+            source_kind: source_kind.to_string(),
+            source_ref: "e2e-mock".to_string(),
+            source_excerpt: "我明天面试，有点紧张".to_string(),
+            source_quote: "我明天面试，有点紧张".to_string(),
+            reason: "e2e 专用 fake 事件，用于验证保存记忆流程。".to_string(),
+            confidence: 0.88,
+            sensitivity: "normal".to_string(),
+            expires_at: String::new(),
+            ttl_days: Some(30),
+        }],
+        reminder_candidates: vec![crate::domain::ReminderCandidate {
+            kind: "follow_up".to_string(),
+            memory_type: "event".to_string(),
+            memory_value: "对方明天面试".to_string(),
+            source_kind: source_kind.to_string(),
+            source_ref: "e2e-mock".to_string(),
+            source_excerpt: "我明天面试，有点紧张".to_string(),
+            recommended_time: "立即触发，仅用于 e2e 验证".to_string(),
+            trigger_at,
+            reason: "e2e 专用 fake 提醒，用于验证创建和到点提醒流程。".to_string(),
+            suggested_follow_up: "今天面试还顺利吗？".to_string(),
+            source_context_id: String::new(),
+            cooldown_key: "e2e:interview-follow-up".to_string(),
+            confidence: 0.86,
+            sensitivity: "normal".to_string(),
+        }],
         context_summary: ContextSummaryCandidate {
             source_kind: source_kind.to_string(),
             source_ref: "e2e-mock".to_string(),

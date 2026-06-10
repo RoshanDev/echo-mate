@@ -11,6 +11,11 @@ const OUT_DIR = process.env.ECHOMATE_E2E_OUT
   || path.join(os.tmpdir(), 'echomate-macos-smoke');
 const CLIPBOARD_TEXT = process.env.ECHOMATE_E2E_CLIPBOARD_TEXT || '我明天面试，有点紧张';
 const APP_PROCESS = 'echo-mate';
+const E2E_ACCOUNT = {
+  id: process.env.ECHOMATE_E2E_ACCOUNT_ID || 'echomate-e2e-account',
+  alias: process.env.ECHOMATE_E2E_CONTACT_ALIAS || 'EchoMate E2E 测试账号',
+  channel: process.env.ECHOMATE_E2E_CONTACT_CHANNEL || 'wechat',
+};
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -127,6 +132,35 @@ function screenshot(name) {
   return outPath;
 }
 
+function sqliteValue(dbPath, sql) {
+  return execFileSync('sqlite3', [dbPath, sql], {
+    encoding: 'utf8',
+    timeout: 5000,
+  }).trim();
+}
+
+function e2eDbEvidence(homeDir) {
+  const dbPath = path.join(homeDir, '.echomate-e2e', 'echomate.db');
+  if (!fs.existsSync(dbPath)) return null;
+  const accountCount = Number(sqliteValue(
+    dbPath,
+    `SELECT COUNT(*) FROM contacts WHERE id='${E2E_ACCOUNT.id}' AND alias='${E2E_ACCOUNT.alias}' AND channel='${E2E_ACCOUNT.channel}' AND is_allowlisted=1;`
+  ));
+  const suggestionRuns = Number(sqliteValue(
+    dbPath,
+    `SELECT COUNT(*) FROM suggestion_runs WHERE contact_id='${E2E_ACCOUNT.id}';`
+  ));
+  const sourceContexts = Number(sqliteValue(
+    dbPath,
+    `SELECT COUNT(*) FROM source_contexts WHERE contact_id='${E2E_ACCOUNT.id}' AND source_excerpt LIKE '%明天面试%';`
+  ));
+  const memoryCandidates = Number(sqliteValue(
+    dbPath,
+    `SELECT COUNT(*) FROM memory_candidates WHERE contact_id='${E2E_ACCOUNT.id}' AND source_ref='e2e-mock';`
+  ));
+  return { dbPath, accountCount, suggestionRuns, sourceContexts, memoryCandidates };
+}
+
 function spawnTauriDev(homeDir) {
   const env = {
     ...process.env,
@@ -135,6 +169,9 @@ function spawnTauriDev(homeDir) {
     CARGO_HOME: process.env.CARGO_HOME || path.join(ORIGINAL_HOME, '.cargo'),
     ECHOMATE_E2E_MOCK_PROVIDER: '1',
     ECHOMATE_E2E_PROFILE_DIR: path.join(homeDir, '.echomate-e2e'),
+    ECHOMATE_E2E_ACCOUNT_ID: E2E_ACCOUNT.id,
+    ECHOMATE_E2E_CONTACT_ALIAS: E2E_ACCOUNT.alias,
+    ECHOMATE_E2E_CONTACT_CHANNEL: E2E_ACCOUNT.channel,
     RUST_LOG: process.env.RUST_LOG || 'info',
   };
   const child = spawn('npx', ['tauri', 'dev'], {
@@ -195,16 +232,18 @@ async function main() {
     screenshot('macos-smoke-before.png');
     clickGenerateButton();
 
-    const text = await waitFor('generated candidates', () => {
-      const current = accessibilityText();
-      return current.includes('已生成 5 条候选回复')
-        && current.includes('候选 1')
-        && current.includes('那你明天面试加油，结束后好好休息。')
+    const evidence = await waitFor('generated candidates in temp e2e database', () => {
+      const current = e2eDbEvidence(homeDir);
+      if (!current) return false;
+      return current.accountCount === 1
+        && current.suggestionRuns >= 1
+        && current.sourceContexts >= 1
+        && current.memoryCandidates >= 1
         && current;
     }, 60000, 1000);
 
     const afterScreenshot = screenshot('macos-smoke-after.png');
-    const logPath = path.join(homeDir, '.echomate', 'logs', `echomate.log.${new Date().toISOString().slice(0, 10)}`);
+    const logPath = path.join(homeDir, '.echomate-e2e', 'logs', `echomate.log.${new Date().toISOString().slice(0, 10)}`);
     const logTail = fs.existsSync(logPath)
       ? fs.readFileSync(logPath, 'utf8').split('\n').slice(-20).join('\n')
       : '';
@@ -214,10 +253,7 @@ async function main() {
       mode: USE_RUNNING_APP ? 'running-app' : 'spawned-tauri-dev',
       window: windowTitle(),
       screenshot: afterScreenshot,
-      textAssertions: {
-        status: text.includes('已生成 5 条候选回复'),
-        firstCandidate: text.includes('那你明天面试加油，结束后好好休息。'),
-      },
+      dbEvidence: evidence,
       logPath: fs.existsSync(logPath) ? logPath : null,
       logTail,
     }, null, 2));

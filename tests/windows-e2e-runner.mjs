@@ -8,6 +8,11 @@ const CDP_URL = process.env.ECHOMATE_CDP_URL || 'http://127.0.0.1:9222/json';
 const OUT_DIR = process.env.ECHOMATE_E2E_OUT
   || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'echo-mate') : 'C:\\Users\\pibao\\echo-mate');
 const E2E_HOTKEY = process.env.ECHOMATE_E2E_HOTKEY || '';
+const E2E_ACCOUNT = {
+  id: process.env.ECHOMATE_E2E_ACCOUNT_ID || 'echomate-e2e-account',
+  alias: process.env.ECHOMATE_E2E_CONTACT_ALIAS || 'EchoMate E2E 测试账号',
+  channel: process.env.ECHOMATE_E2E_CONTACT_CHANNEL || 'wechat',
+};
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -385,15 +390,15 @@ async function main() {
       }
     }))
     .then(() => window.__TAURI_INTERNALS__.invoke('upsert_contact', {
-      contact: { id: null, alias: '测试联系人A', channel: 'wechat', is_allowlisted: true }
+      contact: { id: ${JSON.stringify(E2E_ACCOUNT.id)}, alias: ${JSON.stringify(E2E_ACCOUNT.alias)}, channel: ${JSON.stringify(E2E_ACCOUNT.channel)}, is_allowlisted: true }
     }))
     .then((contact) => window.__TAURI_INTERNALS__.invoke('set_active_contact', { contactId: contact.id }))`);
 
   const beforeInboundCandidates = await evaluate(send, `window.__e2eCounts.candidates`);
   const inboundResult = await evaluate(send, `window.__TAURI_INTERNALS__.invoke('ingest_platform_signal', {
     signal: {
-      contact_alias: '测试联系人A',
-      channel: 'wechat',
+      contact_alias: ${JSON.stringify(E2E_ACCOUNT.alias)},
+      channel: ${JSON.stringify(E2E_ACCOUNT.channel)},
       source: 'notification',
       text: '我明天面试，有点紧张',
       app_name: 'WeChat'
