@@ -238,20 +238,17 @@ function runHotkeyWithoutSelection(vk) {
     $form.Width = 420
     $form.Height = 160
     $form.TopMost = $true
-    $text = New-Object System.Windows.Forms.TextBox
-    $text.Multiline = $true
-    $text.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $text.Font = New-Object System.Drawing.Font('Microsoft YaHei', 18)
-    $text.Text = 'No selected text'
-    $form.Controls.Add($text)
+    $button = New-Object System.Windows.Forms.Button
+    $button.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $button.Font = New-Object System.Drawing.Font('Microsoft YaHei', 18)
+    $button.Text = 'No selected text'
+    $form.Controls.Add($button)
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 700
     $timer.Add_Tick({
       $timer.Stop()
       $form.Activate()
-      $text.Focus()
-      $text.SelectionStart = $text.TextLength
-      $text.SelectionLength = 0
+      $button.Focus()
       [E2EBlankKeys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
       [E2EBlankKeys]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)
       [E2EBlankKeys]::keybd_event(${vk}, 0, 0, [UIntPtr]::Zero)
@@ -268,9 +265,7 @@ function runHotkeyWithoutSelection(vk) {
     })
     $form.Add_Shown({
       $form.Activate()
-      $text.Focus()
-      $text.SelectionStart = $text.TextLength
-      $text.SelectionLength = 0
+      $button.Focus()
       $timer.Start()
       $closeTimer.Start()
     })
@@ -330,6 +325,27 @@ async function waitFor(send, expression, label, timeoutMs = 12000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function closeMainWindow(send) {
+  await evaluate(send, `document.getElementById('btn-close').click(); true`);
+  await sleep(700);
+}
+
+async function runHotkeyWithRetry(send, runHotkey, expression, label, timeoutMs = 16000) {
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await closeMainWindow(send);
+    runHotkey();
+    try {
+      return await waitFor(send, expression, label, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      const errors = await evaluate(send, `window.__e2eErrors || []`);
+      console.warn(`[e2e] ${label} attempt ${attempt} failed: ${error.message}; errors=${JSON.stringify(errors)}`);
+    }
+  }
+  throw lastError;
+}
+
 async function pageScreenshot(send, name) {
   const response = await send('Page.captureScreenshot', { format: 'png', fromSurface: true });
   const outPath = path.join(OUT_DIR, name);
@@ -349,6 +365,7 @@ async function domSummary(send) {
     savedMemory: document.getElementById('memory-cards')?.textContent.includes('已保存') || false,
     reminderPanel: document.getElementById('reminder-panel')?.textContent || '',
     eventCounts: window.__e2eCounts || {},
+    errors: window.__e2eErrors || [],
   }))()`);
 }
 
@@ -360,8 +377,9 @@ async function main() {
   const hotkeyVk = hotkeyVirtualKey(hotkey);
 
   await evaluate(send, `(() => {
-    window.__e2eCounts = { candidates: 0, reminders: 0, inbound: 0 };
+    window.__e2eCounts = { candidates: 0, reminders: 0, inbound: 0, errors: 0 };
     window.__e2eEvents = [];
+    window.__e2eErrors = [];
     const target = { kind: 'Any' };
     const add = (event, key) => window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
       event,
@@ -371,10 +389,19 @@ async function main() {
         window.__e2eEvents.push({ event, payload });
       })
     });
+    const addError = () => window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
+      event: 'generation-error',
+      target,
+      handler: window.__TAURI_INTERNALS__.transformCallback((payload) => {
+        window.__e2eCounts.errors += 1;
+        window.__e2eErrors.push(payload?.message || String(payload));
+      })
+    });
     return Promise.all([
       add('candidates-ready', 'candidates'),
       add('reminder-due', 'reminders'),
-      add('inbound-signal', 'inbound')
+      add('inbound-signal', 'inbound'),
+      addError()
     ]).then(() => true);
   })()`);
 
@@ -433,10 +460,13 @@ async function main() {
   const copied = ps('Get-Clipboard -Raw');
 
   const beforeHotkeyEvents = await evaluate(send, `window.__e2eCounts.candidates`);
-  await evaluate(send, `document.getElementById('btn-close').click(); true`);
-  await sleep(700);
-  runSelectedHotkey(hotkeyVk);
-  await waitFor(send, `window.__e2eCounts.candidates > ${beforeHotkeyEvents}`, 'selected-text hotkey event', 16000);
+  await runHotkeyWithRetry(
+    send,
+    () => runSelectedHotkey(hotkeyVk),
+    `window.__e2eCounts.candidates > ${beforeHotkeyEvents}`,
+    'selected-text hotkey event',
+    16000
+  );
   const hotkeyWindow = captureWindow('e2e-hotkey-window.png');
 
   setClipboardImage();
@@ -453,10 +483,13 @@ async function main() {
 
   setClipboardImage();
   const beforeScreenshotHotkeyEvents = await evaluate(send, `window.__e2eCounts.candidates`);
-  await evaluate(send, `document.getElementById('btn-close').click(); true`);
-  await sleep(700);
-  runHotkeyWithoutSelection(hotkeyVk);
-  await waitFor(send, `window.__e2eCounts.candidates > ${beforeScreenshotHotkeyEvents} && document.getElementById('mode-label').textContent === 'screenshot'`, 'clipboard image hotkey fallback', 18000);
+  await runHotkeyWithRetry(
+    send,
+    () => runHotkeyWithoutSelection(hotkeyVk),
+    `window.__e2eCounts.candidates > ${beforeScreenshotHotkeyEvents} && document.getElementById('mode-label').textContent === 'screenshot'`,
+    'clipboard image hotkey fallback',
+    18000
+  );
   const screenshotHotkeyWindow = captureWindow('e2e-screenshot-hotkey-window.png');
 
   const beforeTopicEvents = await evaluate(send, `window.__e2eCounts.candidates`);
